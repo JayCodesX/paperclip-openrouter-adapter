@@ -123,29 +123,32 @@ const fs = require("fs");
 const file = process.argv[2];
 let src = fs.readFileSync(file, "utf8");
 
-if (src.includes('"hermes_local","openrouter"]')) {
-  console.log("  (UI bundle already contains openrouter — skipping)");
-  process.exit(0);
-}
+let changed = false;
 
 // Add "openrouter" to the full adapter types list (b1)
-let patched = src.replace(
-  /"openclaw_gateway","hermes_local"\]/,
-  '"openclaw_gateway","hermes_local","openrouter"]'
-);
+if (!src.includes('"hermes_local","openrouter"]')) {
+  src = src.replace(
+    /"openclaw_gateway","hermes_local"\]/,
+    '"openclaw_gateway","hermes_local","openrouter"]'
+  );
+  changed = true;
+}
 
 // Add "openrouter" to the enabled adapters Set (pZe) so it isn't grayed out
-patched = patched.replace(
-  /new Set\(\["claude_local","codex_local","gemini_local","opencode_local","cursor"\]\)/,
-  'new Set(["claude_local","codex_local","gemini_local","opencode_local","cursor","openrouter"])'
-);
+if (!src.includes('"cursor","openrouter"]')) {
+  src = src.replace(
+    /new Set\(\["claude_local","codex_local","gemini_local","opencode_local","cursor"\]\)/,
+    'new Set(["claude_local","codex_local","gemini_local","opencode_local","cursor","openrouter"])'
+  );
+  changed = true;
+}
 
-if (patched === src) {
-  console.log("  ⚠ Could not find adapter arrays in UI bundle — skipping.");
+if (!changed) {
+  console.log("  (UI bundle already patched — skipping)");
   process.exit(0);
 }
 
-fs.writeFileSync(file, patched, "utf8");
+fs.writeFileSync(file, src, "utf8");
 console.log("  Done.");
 NODE_SCRIPT
 else
