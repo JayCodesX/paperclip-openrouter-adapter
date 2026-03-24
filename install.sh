@@ -143,6 +143,15 @@ if (!src.includes('"cursor","openrouter"]')) {
   changed = true;
 }
 
+// Add display label so it shows as "OpenRouter (orager)" not "openrouter"
+if (!src.includes('openrouter:"OpenRouter')) {
+  src = src.replace(
+    /http:"HTTP"\}/,
+    'http:"HTTP",openrouter:"OpenRouter (orager)"}'
+  );
+  changed = true;
+}
+
 if (!changed) {
   console.log("  (UI bundle already patched — skipping)");
   process.exit(0);
