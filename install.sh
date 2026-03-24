@@ -62,7 +62,7 @@ const adapterDef = `const openrouterAdapter: ServerAdapterModule = {
 src = src.replace(/(const adaptersByType)/, adapterDef + "$1");
 
 // Add openrouterAdapter into the Map initializer array
-src = src.replace(/(processAdapter,\s*\nhttpAdapter,)/, "openrouterAdapter,\n    $1");
+src = src.replace(/(processAdapter,\n\s*httpAdapter,)/, "openrouterAdapter,\n    $1");
 
 fs.writeFileSync(file, src, "utf8");
 console.log("  Done.");
@@ -114,7 +114,7 @@ const cliDef = `const openrouterCLIAdapter: CLIAdapterModule = {
 src = src.replace(/(const adaptersByType)/, cliDef + "$1");
 
 // Add to map
-src = src.replace(/(processCLIAdapter,\s*\nhttpCLIAdapter,)/, "openrouterCLIAdapter,\n    $1");
+src = src.replace(/(processCLIAdapter,\n\s*httpCLIAdapter,)/, "openrouterCLIAdapter,\n    $1");
 
 fs.writeFileSync(file, src, "utf8");
 console.log("  Done.");
