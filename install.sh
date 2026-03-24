@@ -104,6 +104,47 @@ else
   exit 1
 fi
 
+# ── 3. Patch UI bundle ────────────────────────────────────────────────────────
+UI_BUNDLE=""
+UI_DIST="$PAPERCLIP_ROOT/node_modules/@paperclipai/server/ui-dist/assets"
+if [[ -d "$UI_DIST" ]]; then
+  for f in "$UI_DIST"/*.js; do
+    if grep -q '"claude_local","codex_local"' "$f" 2>/dev/null; then
+      UI_BUNDLE="$f"
+      break
+    fi
+  done
+fi
+
+if [[ -n "$UI_BUNDLE" ]]; then
+  echo "→ Patching UI bundle: $(basename "$UI_BUNDLE") ..."
+  node - "$UI_BUNDLE" <<'NODE_SCRIPT'
+const fs = require("fs");
+const file = process.argv[2];
+let src = fs.readFileSync(file, "utf8");
+
+if (src.includes('"hermes_local","openrouter"]')) {
+  console.log("  (UI bundle already contains openrouter — skipping)");
+  process.exit(0);
+}
+
+const patched = src.replace(
+  /"openclaw_gateway","hermes_local"\]/,
+  '"openclaw_gateway","hermes_local","openrouter"]'
+);
+
+if (patched === src) {
+  console.log("  ⚠ Could not find adapter types array in UI bundle — skipping.");
+  process.exit(0);
+}
+
+fs.writeFileSync(file, patched, "utf8");
+console.log("  Done.");
+NODE_SCRIPT
+else
+  echo "⚠  UI bundle not found — OpenRouter will not appear in the adapter dropdown."
+fi
+
 echo ""
 echo "✓ OpenRouter adapter installed."
 echo ""
@@ -111,4 +152,4 @@ echo "  Restart paperclipai, then create or edit an agent and select"
 echo "  'OpenRouter (orager)' as the adapter type."
 echo ""
 echo "  Requires: orager on PATH  →  npm install -g orager"
-echo "  API key:  set OPENROUTER_API_KEY env var or apiKey in agent config"
+echo "  API key:  set OPENROUTER_API_KEY env var before starting paperclipai"
