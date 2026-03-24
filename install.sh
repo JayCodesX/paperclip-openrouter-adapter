@@ -146,8 +146,17 @@ if (!src.includes('"cursor","openrouter"]')) {
 // Add display label so it shows as "OpenRouter (orager)" not "openrouter"
 if (!src.includes('openrouter:"OpenRouter')) {
   src = src.replace(
-    /http:"HTTP"\}/,
-    'http:"HTTP",openrouter:"OpenRouter (orager)"}'
+    /process:"Process",\s*http:"HTTP"\s*\}/,
+    'process:"Process",http:"HTTP",openrouter:"OpenRouter (orager)"}'
+  );
+  changed = true;
+}
+
+// Allow saving when openrouter is selected
+if (!src.includes('P==="cursor"||P==="openrouter"')) {
+  src = src.replace(
+    /P==="claude_local"\|\|P==="codex_local"\|\|P==="gemini_local"\|\|P==="opencode_local"\|\|P==="cursor"/,
+    'P==="claude_local"||P==="codex_local"||P==="gemini_local"||P==="opencode_local"||P==="cursor"||P==="openrouter"'
   );
   changed = true;
 }
