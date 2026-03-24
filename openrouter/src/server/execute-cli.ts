@@ -117,7 +117,7 @@ const DEFAULT_GRACE_SEC = 20;
 export async function executeAgentLoop(
   ctx: AdapterExecutionContext,
 ): Promise<AdapterExecutionResult> {
-  const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } =
+  const { runId, agent, runtime, config, context, onLog, onMeta, authToken } =
     ctx;
 
   // ── Config ─────────────────────────────────────────────────────────────────
@@ -575,9 +575,6 @@ export async function executeAgentLoop(
       return;
     }
 
-    // Notify Paperclip that the process has been spawned
-    onSpawn?.(proc as Parameters<NonNullable<typeof onSpawn>>[0]);
-
     // Write prompt to stdin
     try {
       proc.stdin?.write(prompt, "utf8");
@@ -743,7 +740,7 @@ export async function executeAgentLoop(
         provider: "openrouter",
         biller: "openrouter",
         billingType: "api",
-        totalCostUsd,
+        costUsd: totalCostUsd,
         sessionParams: newSessionParams,
         sessionDisplayId: sessionId || null,
         summary: resultText,

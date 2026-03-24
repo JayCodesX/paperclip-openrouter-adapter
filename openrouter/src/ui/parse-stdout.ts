@@ -134,10 +134,10 @@ function parseOragerResultEvent(
         ? usageRaw.cache_read_input_tokens
         : 0
       : 0,
-    costUsd: totalCostUsd || null,
+    costUsd: totalCostUsd || 0,
     subtype: isSuccess ? "success" : subtype,
     isError: !isSuccess,
-    errors: isSuccess ? [] : [{ message: resultText || subtype }],
+    errors: isSuccess ? [] : [resultText || subtype],
     model: "openrouter",
   } as TranscriptEntry);
 
@@ -183,7 +183,7 @@ function parseHttpResultEvent(
       : 0,
     cachedTokens:
       typeof parsed.cachedTokens === "number" ? parsed.cachedTokens : 0,
-    costUsd: null,
+    costUsd: 0,
     subtype: "success",
     isError: false,
     errors: [],

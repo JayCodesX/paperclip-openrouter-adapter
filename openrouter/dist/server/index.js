@@ -1,0 +1,8 @@
+// Paperclip calls `execute` on every adapter run.
+// We expose `executeAgentLoop` under that name so the orager agent loop
+// is triggered automatically when this adapter is selected.
+export { executeAgentLoop as execute } from "./execute-cli.js";
+export { testEnvironment } from "./test.js";
+// Re-export the session codec so paperclip can import it from the server entry.
+export { sessionCodec } from "../index.js";
+//# sourceMappingURL=index.js.map
