@@ -2,10 +2,7 @@
 # install.sh — drop the OpenRouter (orager) adapter into a Paperclip monorepo.
 #
 # Usage (run from the paperclip repo root):
-#   bash /path/to/openrouter-local/install.sh
-#
-# Or, if this script is already inside the paperclip repo:
-#   bash packages/adapters/openrouter/../../openrouter-local/install.sh
+#   bash /path/to/paperclip-openrouter-adapter/install.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

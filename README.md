@@ -45,7 +45,7 @@ export OPENROUTER_API_KEY=sk-or-...  # or set per-agent in the adapter config
 Run from the **Paperclip repo root**:
 
 ```bash
-bash /path/to/openrouter-local/install.sh
+bash /path/to/paperclip-openrouter-adapter/install.sh
 ```
 
 The script:
@@ -65,7 +65,7 @@ Restart Paperclip → **OpenRouter (orager)** appears in the adapter dropdown.
 ## Files
 
 ```
-openrouter-local/
+paperclip-openrouter-adapter/
 ├── README.md
 ├── install.sh            one-command install (run from Paperclip root)
 │
