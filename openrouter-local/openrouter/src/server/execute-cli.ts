@@ -108,7 +108,7 @@ const DEFAULT_GRACE_SEC = 20;
 
 /**
  * Execute an autonomous agent loop by spawning the `orager` CLI as a
- * subprocess, analogous to how `claude_local` spawns the Claude CLI.
+ * subprocess, using the same pattern as local CLI adapters in Paperclip.
  *
  * Orager writes stream-json events to stdout; this function streams those
  * lines back to Paperclip via `onLog` and returns a structured result once
@@ -123,7 +123,7 @@ export async function executeAgentLoop(
   // ── Config ─────────────────────────────────────────────────────────────────
   const cliPath = asString(config.cliPath, DEFAULT_CLI);
   const model = asString(config.model, DEFAULT_MODEL);
-  // Support both maxTurns and maxTurnsPerRun (matches claude_local naming)
+  // Support both maxTurns and maxTurnsPerRun (alias for compatibility)
   const maxTurns = asNumber(
     config.maxTurnsPerRun ?? config.maxTurns,
     DEFAULT_MAX_TURNS,
@@ -254,7 +254,7 @@ export async function executeAgentLoop(
     ? config.addDirs.filter((d: unknown) => typeof d === "string")
     : [];
 
-  // Extra passthrough args (like claude_local's extraArgs/args)
+  // Extra passthrough args (extraArgs or args alias)
   const extraArgs = (() => {
     const fromExtraArgs = asStringArray(config.extraArgs);
     if (fromExtraArgs.length > 0) return fromExtraArgs;
@@ -315,7 +315,7 @@ export async function executeAgentLoop(
     : workspaceCwd;
   const cwd = effectiveWorkspaceCwd || configuredCwd || process.cwd();
 
-  // Ensure cwd exists (mirrors claude_local behavior)
+  // Ensure cwd exists
   try {
     await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
   } catch {
@@ -701,7 +701,7 @@ export async function executeAgentLoop(
 
       const isSuccess = subtype === "success";
       const isMaxTurns = subtype === "error_max_turns";
-      // error_max_turns is a soft stop (like claude_local): the run completed
+      // error_max_turns is a soft stop — the run completed
       // partially, the process exited cleanly, so we preserve exitCode 0 and
       // clear the session so it won't be resumed.
       const softStop = isSuccess || isMaxTurns;

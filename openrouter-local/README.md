@@ -1,6 +1,6 @@
 # openrouter-local — Paperclip adapter
 
-Adds **OpenRouter-backed agent loops** to [Paperclip](https://paperclipai.com) using the [`orager`](https://github.com/paperclipai/orager) CLI — same architecture as `claude_local` but works with any OpenRouter model (DeepSeek, GPT-4o, Gemini, Claude, Llama, and 300+ more).
+Adds **OpenRouter-backed agent loops** to [Paperclip](https://paperclipai.com) using the [`orager`](https://github.com/JayCodesX/orager) CLI — works with any OpenRouter model (DeepSeek, GPT-4o, Gemini, Anthropic, Llama, and 300+ more).
 
 ---
 
