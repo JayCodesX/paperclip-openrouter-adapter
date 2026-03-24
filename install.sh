@@ -128,13 +128,20 @@ if (src.includes('"hermes_local","openrouter"]')) {
   process.exit(0);
 }
 
-const patched = src.replace(
+// Add "openrouter" to the full adapter types list (b1)
+let patched = src.replace(
   /"openclaw_gateway","hermes_local"\]/,
   '"openclaw_gateway","hermes_local","openrouter"]'
 );
 
+// Add "openrouter" to the enabled adapters Set (pZe) so it isn't grayed out
+patched = patched.replace(
+  /new Set\(\["claude_local","codex_local","gemini_local","opencode_local","cursor"\]\)/,
+  'new Set(["claude_local","codex_local","gemini_local","opencode_local","cursor","openrouter"])'
+);
+
 if (patched === src) {
-  console.log("  ⚠ Could not find adapter types array in UI bundle — skipping.");
+  console.log("  ⚠ Could not find adapter arrays in UI bundle — skipping.");
   process.exit(0);
 }
 
