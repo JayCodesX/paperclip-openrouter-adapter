@@ -48,32 +48,32 @@ rm -rf "$ADAPTER_DEST"
 cp -r "$SCRIPT_DIR/openrouter" "$ADAPTER_DEST"
 
 # ── 2. Patch Zod adapterType enum in @paperclipai/shared ─────────────────────
-SHARED_AGENT_VALIDATOR=""
+SHARED_CONSTANTS=""
 for candidate in \
-  "$PAPERCLIP_ROOT/node_modules/@paperclipai/shared/dist/validators/agent.js" \
-  "$PAPERCLIP_ROOT/node_modules/@paperclipai/server/node_modules/@paperclipai/shared/dist/validators/agent.js"; do
-  if [[ -f "$candidate" ]]; then SHARED_AGENT_VALIDATOR="$candidate"; break; fi
+  "$PAPERCLIP_ROOT/node_modules/@paperclipai/shared/dist/constants.js" \
+  "$PAPERCLIP_ROOT/node_modules/@paperclipai/server/node_modules/@paperclipai/shared/dist/constants.js"; do
+  if [[ -f "$candidate" ]]; then SHARED_CONSTANTS="$candidate"; break; fi
 done
 
-if [[ -n "$SHARED_AGENT_VALIDATOR" ]]; then
-  echo "→ Patching adapter type enum: $SHARED_AGENT_VALIDATOR ..."
-  node - "$SHARED_AGENT_VALIDATOR" <<'NODE_SCRIPT'
+if [[ -n "$SHARED_CONSTANTS" ]]; then
+  echo "→ Patching AGENT_ADAPTER_TYPES: $SHARED_CONSTANTS ..."
+  node - "$SHARED_CONSTANTS" <<'NODE_SCRIPT'
 const fs = require("fs");
 const file = process.argv[2];
 let src = fs.readFileSync(file, "utf8");
 
-if (src.includes('"hermes_local","openrouter"')) {
-  console.log("  (adapterType enum already contains openrouter — skipping)");
+if (src.includes('"openrouter"')) {
+  console.log("  (AGENT_ADAPTER_TYPES already contains openrouter — skipping)");
   process.exit(0);
 }
 
 const patched = src.replace(
-  /"hermes_local"\]\)/g,
-  '"hermes_local","openrouter"])'
+  /"hermes_local",\s*\n]/,
+  '"hermes_local",\n    "openrouter",\n]'
 );
 
 if (patched === src) {
-  console.log("  ⚠ Could not find adapterType enum — skipping.");
+  console.log("  ⚠ Could not find AGENT_ADAPTER_TYPES array — skipping.");
   process.exit(0);
 }
 
@@ -81,7 +81,7 @@ fs.writeFileSync(file, patched, "utf8");
 console.log("  Done.");
 NODE_SCRIPT
 else
-  echo "⚠  @paperclipai/shared validator not found — adapter type may be rejected by server."
+  echo "⚠  @paperclipai/shared constants not found — adapter type may be rejected by server."
 fi
 
 # ── 3. Find and patch server registry ────────────────────────────────────────
