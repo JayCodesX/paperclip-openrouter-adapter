@@ -1,4 +1,12 @@
-import type { AdapterSkillContext, AdapterSkillSnapshot } from "@paperclipai/adapter-utils";
-export declare function listOpenRouterSkills(_ctx: AdapterSkillContext): Promise<AdapterSkillSnapshot>;
-export declare function syncOpenRouterSkills(_ctx: AdapterSkillContext, _desiredSkills: string[]): Promise<AdapterSkillSnapshot>;
+declare const SNAPSHOT: {
+    adapterType: string;
+    supported: boolean;
+    mode: null;
+    desiredSkills: never[];
+    entries: never[];
+    warnings: string[];
+};
+export declare function listOpenRouterSkills(_ctx: unknown): Promise<typeof SNAPSHOT>;
+export declare function syncOpenRouterSkills(_ctx: unknown, _desiredSkills: string[]): Promise<typeof SNAPSHOT>;
+export {};
 //# sourceMappingURL=skills.d.ts.map

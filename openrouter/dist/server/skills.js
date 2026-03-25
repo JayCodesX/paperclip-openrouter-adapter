@@ -1,3 +1,5 @@
+// Skills are not managed by the OpenRouter adapter.
+// Return a "not supported" snapshot so the skills screen renders cleanly.
 const SNAPSHOT = {
     adapterType: "openrouter",
     supported: false,

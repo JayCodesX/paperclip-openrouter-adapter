@@ -1,6 +1,7 @@
-import type { AdapterSkillContext, AdapterSkillSnapshot } from "@paperclipai/adapter-utils";
+// Skills are not managed by the OpenRouter adapter.
+// Return a "not supported" snapshot so the skills screen renders cleanly.
 
-const SNAPSHOT: AdapterSkillSnapshot = {
+const SNAPSHOT = {
   adapterType: "openrouter",
   supported: false,
   mode: null,
@@ -12,13 +13,13 @@ const SNAPSHOT: AdapterSkillSnapshot = {
   ],
 };
 
-export async function listOpenRouterSkills(_ctx: AdapterSkillContext): Promise<AdapterSkillSnapshot> {
+export async function listOpenRouterSkills(_ctx: unknown): Promise<typeof SNAPSHOT> {
   return SNAPSHOT;
 }
 
 export async function syncOpenRouterSkills(
-  _ctx: AdapterSkillContext,
+  _ctx: unknown,
   _desiredSkills: string[],
-): Promise<AdapterSkillSnapshot> {
+): Promise<typeof SNAPSHOT> {
   return SNAPSHOT;
 }
