@@ -146,8 +146,8 @@ if (!src.includes('"cursor","openrouter"]')) {
 // Add display label so it shows as "OpenRouter (orager)" not "openrouter"
 if (!src.includes('openrouter:"OpenRouter')) {
   src = src.replace(
-    /process:"Process",\s*http:"HTTP"\s*\}/,
-    'process:"Process",http:"HTTP",openrouter:"OpenRouter (orager)"}'
+    /(vle=\{[^}]*)http:"HTTP"\s*\}/,
+    '$1http:"HTTP",openrouter:"OpenRouter (orager)"}'
   );
   changed = true;
 }
