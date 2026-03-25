@@ -47,7 +47,44 @@ echo "→ Copying adapter to $ADAPTER_DEST ..."
 rm -rf "$ADAPTER_DEST"
 cp -r "$SCRIPT_DIR/openrouter" "$ADAPTER_DEST"
 
-# ── 2. Find and patch server registry ────────────────────────────────────────
+# ── 2. Patch Zod adapterType enum in @paperclipai/shared ─────────────────────
+SHARED_AGENT_VALIDATOR=""
+for candidate in \
+  "$PAPERCLIP_ROOT/node_modules/@paperclipai/shared/dist/validators/agent.js" \
+  "$PAPERCLIP_ROOT/node_modules/@paperclipai/server/node_modules/@paperclipai/shared/dist/validators/agent.js"; do
+  if [[ -f "$candidate" ]]; then SHARED_AGENT_VALIDATOR="$candidate"; break; fi
+done
+
+if [[ -n "$SHARED_AGENT_VALIDATOR" ]]; then
+  echo "→ Patching adapter type enum: $SHARED_AGENT_VALIDATOR ..."
+  node - "$SHARED_AGENT_VALIDATOR" <<'NODE_SCRIPT'
+const fs = require("fs");
+const file = process.argv[2];
+let src = fs.readFileSync(file, "utf8");
+
+if (src.includes('"hermes_local","openrouter"')) {
+  console.log("  (adapterType enum already contains openrouter — skipping)");
+  process.exit(0);
+}
+
+const patched = src.replace(
+  /"hermes_local"\]\)/g,
+  '"hermes_local","openrouter"])'
+);
+
+if (patched === src) {
+  console.log("  ⚠ Could not find adapterType enum — skipping.");
+  process.exit(0);
+}
+
+fs.writeFileSync(file, patched, "utf8");
+console.log("  Done.");
+NODE_SCRIPT
+else
+  echo "⚠  @paperclipai/shared validator not found — adapter type may be rejected by server."
+fi
+
+# ── 3. Find and patch server registry ────────────────────────────────────────
 SERVER_REGISTRY=""
 
 for candidate in \
