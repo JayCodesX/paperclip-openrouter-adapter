@@ -189,30 +189,18 @@ if (!src.includes('openrouter:"OpenRouter')) {
   changed = true;
 }
 
-// Allow saving when openrouter is selected
-if (!src.includes('P==="cursor"||P==="openrouter"')) {
-  src = src.replace(
-    /P==="claude_local"\|\|P==="codex_local"\|\|P==="gemini_local"\|\|P==="opencode_local"\|\|P==="cursor"/,
-    'P==="claude_local"||P==="codex_local"||P==="gemini_local"||P==="opencode_local"||P==="cursor"||P==="openrouter"'
-  );
-  changed = true;
-}
-
-// Add openrouter to isLocal check so ModelDropdown and Command field appear
-// The AgentConfigForm isLocal uniquely has the pi_local→cursor sequence
-// (AgentDetail's isLocal has hermes_local→cursor instead)
+// Add openrouter to the isLocal condition (inlined by minifier in multiple places).
+// isLocal gates the Command field, ModelDropdown, and Permissions section.
+// Use a negative lookahead so already-patched occurrences are skipped and only
+// remaining un-patched ones are updated (handles partial previous installs too).
 {
-  const m = src.match(/(\w+)==="pi_local"\|\|\1==="cursor"/);
-  if (m) {
-    const v = m[1];
-    const needle = v + '==="pi_local"||' + v + '==="cursor"';
-    const replacement = v + '==="pi_local"||' + v + '==="cursor"||' + v + '==="openrouter"';
-    if (!src.includes(replacement)) {
-      src = src.replace(needle, replacement);
-      changed = true;
-    }
-  } else {
-    console.log("  ⚠ Could not find isLocal check — Model dropdown may not appear.");
+  const origPattern = /P==="claude_local"\|\|P==="codex_local"\|\|P==="gemini_local"\|\|P==="opencode_local"\|\|P==="cursor"(?!\|\|P==="openrouter")/g;
+  if (origPattern.test(src)) {
+    src = src.replace(
+      /P==="claude_local"\|\|P==="codex_local"\|\|P==="gemini_local"\|\|P==="opencode_local"\|\|P==="cursor"(?!\|\|P==="openrouter")/g,
+      'P==="claude_local"||P==="codex_local"||P==="gemini_local"||P==="opencode_local"||P==="cursor"||P==="openrouter"'
+    );
+    changed = true;
   }
 }
 
