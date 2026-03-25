@@ -244,6 +244,10 @@ export async function executeAgentLoop(ctx) {
         null;
     if (taskId && authToken) {
         const paperclipApiUrl = (buildPaperclipEnv(agent).PAPERCLIP_API_URL ?? "").replace(/\/$/, "");
+        const prefetchUrl = paperclipApiUrl
+            ? `${paperclipApiUrl}/api/issues/${taskId}/heartbeat-context`
+            : "(no api url)";
+        await onLog("stderr", `[orager] pre-fetch: ${prefetchUrl}\n`);
         if (paperclipApiUrl) {
             try {
                 const qs = wakeCommentId ? `?wakeCommentId=${encodeURIComponent(wakeCommentId)}` : "";
@@ -251,13 +255,17 @@ export async function executeAgentLoop(ctx) {
                     headers: { Authorization: `Bearer ${authToken}` },
                     signal: AbortSignal.timeout(5000),
                 });
+                await onLog("stderr", `[orager] pre-fetch response: ${resp.status} ${resp.statusText}\n`);
                 if (resp.ok)
                     heartbeatCtx = (await resp.json());
             }
-            catch {
-                // Non-fatal — prompt will fall back to env-var hint
+            catch (err) {
+                await onLog("stderr", `[orager] pre-fetch error: ${String(err)}\n`);
             }
         }
+    }
+    else {
+        await onLog("stderr", `[orager] pre-fetch skipped: taskId=${String(taskId)} authToken=${authToken ? "set" : "missing"}\n`);
     }
     function formatHeartbeatContext(hc) {
         const lines = [];
