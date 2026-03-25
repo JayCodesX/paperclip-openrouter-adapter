@@ -247,7 +247,7 @@ export async function executeAgentLoop(ctx) {
         if (paperclipApiUrl) {
             try {
                 const qs = wakeCommentId ? `?wakeCommentId=${encodeURIComponent(wakeCommentId)}` : "";
-                const resp = await fetch(`${paperclipApiUrl}/issues/${taskId}/heartbeat-context${qs}`, {
+                const resp = await fetch(`${paperclipApiUrl}/api/issues/${taskId}/heartbeat-context${qs}`, {
                     headers: { Authorization: `Bearer ${authToken}` },
                     signal: AbortSignal.timeout(5000),
                 });
@@ -335,7 +335,7 @@ export async function executeAgentLoop(ctx) {
             "Wake reason: {{context.wakeReason}}\n" +
             "Workspace: {{context.paperclipWorkspace.cwd}}\n\n" +
             "Fetch the task details, then complete it:\n" +
-            "  curl -s \"$PAPERCLIP_API_URL/issues/$PAPERCLIP_TASK_ID/heartbeat-context\" \\\n" +
+            "  curl -s \"$PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID/heartbeat-context\" \\\n" +
             "    -H \"Authorization: Bearer $PAPERCLIP_API_KEY\"\n\n" +
             "Proceed with your work.";
     const promptTemplate = asString(config.promptTemplate, DEFAULT_PROMPT_TEMPLATE);
