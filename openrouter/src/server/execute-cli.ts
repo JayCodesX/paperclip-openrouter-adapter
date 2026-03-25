@@ -576,15 +576,7 @@ export async function executeAgentLoop(
   const contextEnv: Record<string, string> = {};
 
   // Task / wake context
-  const wakeTaskId =
-    (typeof context.taskId === "string" &&
-      context.taskId.trim().length > 0 &&
-      context.taskId.trim()) ||
-    (typeof context.issueId === "string" &&
-      context.issueId.trim().length > 0 &&
-      context.issueId.trim()) ||
-    null;
-  if (wakeTaskId) contextEnv.PAPERCLIP_TASK_ID = wakeTaskId;
+  if (taskId) contextEnv.PAPERCLIP_TASK_ID = taskId;
   if (typeof context.wakeReason === "string" && context.wakeReason.trim())
     contextEnv.PAPERCLIP_WAKE_REASON = context.wakeReason.trim();
   const commentId =
