@@ -178,6 +178,71 @@ provider:
 
 ---
 
+## Model chaining with the orager MCP server
+
+Because OpenRouter proxies all major models under one API key, you can chain models within a single Paperclip task — for example, use a cheap fast model for implementation and a smarter model for code review — without any direct Anthropic API key.
+
+### How it works
+
+1. Paperclip assigns a task to the OpenRouter adapter (e.g. DeepSeek implements a feature)
+2. The agent calls `run_agent` via the orager MCP server with a different model (e.g. Claude via OpenRouter) to review the changes
+3. The reviewer posts results back to Paperclip as a comment
+
+```
+Paperclip task
+    │
+    ▼
+orager → DeepSeek (implementation)
+    │  edits files, runs tests, commits
+    │
+    │  calls run_agent MCP tool
+    ▼
+orager → Claude via OpenRouter (review)
+    │  runs git diff, checks correctness
+    ▼
+post-comment → Paperclip issue
+```
+
+### Setup
+
+Install and run the orager MCP server from the orager repo:
+
+```bash
+cd ~/Projects/orager
+npm run build
+```
+
+Add to your MCP config (Cursor, Claude Desktop, etc.):
+
+```json
+{
+  "mcpServers": {
+    "orager": {
+      "command": "node",
+      "args": ["/path/to/orager/dist/mcp.js"],
+      "env": {
+        "OPENROUTER_API_KEY": "sk-or-...",
+        "ORAGER_DEFAULT_MODEL": "deepseek/deepseek-chat-v3-0324"
+      }
+    }
+  }
+}
+```
+
+The `delegate-review` skill (bundled in `skills/.orager/skills/delegate-review/SKILL.md`) teaches the agent when and how to call `run_agent` for review. See that file for the full convention.
+
+### Model chaining convention
+
+| Step | Purpose | Suggested model |
+|---|---|---|
+| Implementation | Write code, edit files, run tests | `deepseek/deepseek-chat-v3-0324` |
+| Review | Audit diff, check correctness | `anthropic/claude-sonnet-4-6` |
+| Deep reasoning | Complex architecture decisions | `deepseek/deepseek-r1` |
+
+All models go through the same OpenRouter API key — no separate Anthropic key needed.
+
+---
+
 ## Popular model IDs
 
 | Model | ID |

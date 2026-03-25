@@ -300,11 +300,47 @@ else
   echo "  Done."
 fi
 
+# ── 6. Build and reinstall orager ────────────────────────────────────────────
+# If the orager source repo exists locally, rebuild and reinstall the global
+# binary so changes to the MCP server, session pruning, etc. take effect.
+# On the remote Mac Mini this keeps orager in sync whenever install.sh is run.
+ORAGER_REPO="$HOME/Projects/orager"
+
+if [[ -d "$ORAGER_REPO" ]]; then
+  echo "→ Found orager repo at $ORAGER_REPO — rebuilding ..."
+
+  # Pull latest changes (fail silently if not a git repo or no remote)
+  if [[ -d "$ORAGER_REPO/.git" ]]; then
+    git -C "$ORAGER_REPO" pull --ff-only 2>&1 | sed 's/^/  /' || echo "  ⚠ git pull failed — using current state"
+  fi
+
+  # Install deps (picks up new packages like @modelcontextprotocol/sdk)
+  (cd "$ORAGER_REPO" && npm install --silent 2>&1 | tail -3 | sed 's/^/  /')
+
+  # Build TypeScript
+  if (cd "$ORAGER_REPO" && node node_modules/typescript/bin/tsc 2>&1 | sed 's/^/  /'); then
+    echo "  Build ok."
+  else
+    echo "  ⚠ orager build had errors — check output above."
+  fi
+
+  # Reinstall global binary (orager + orager-mcp)
+  (cd "$ORAGER_REPO" && npm install -g . --silent 2>&1 | sed 's/^/  /') || \
+    (cd "$ORAGER_REPO" && sudo npm install -g . 2>&1 | sed 's/^/  /')
+  echo "  ✓ orager reinstalled globally."
+elif command -v orager &>/dev/null; then
+  echo "→ orager found on PATH at $(command -v orager) — skipping rebuild."
+  echo "  (clone ~/Projects/orager to enable auto-rebuild)"
+else
+  echo "⚠  orager not found. Install it manually:"
+  echo "   git clone <orager-repo-url> ~/Projects/orager"
+  echo "   cd ~/Projects/orager && npm install && npm run build && npm install -g ."
+fi
+
 echo ""
 echo "✓ OpenRouter adapter installed."
 echo ""
 echo "  Restart paperclipai, then create or edit an agent and select"
 echo "  'OpenRouter (orager)' as the adapter type."
 echo ""
-echo "  Requires: orager on PATH  →  npm install -g orager"
-echo "  API key:  set OPENROUTER_API_KEY env var before starting paperclipai"
+echo "  API key: set OPENROUTER_API_KEY env var before starting paperclipai"
