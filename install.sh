@@ -48,22 +48,21 @@ rm -rf "$ADAPTER_DEST"
 cp -r "$SCRIPT_DIR/openrouter" "$ADAPTER_DEST"
 
 # ── 2. Patch Zod adapterType enum in @paperclipai/shared ─────────────────────
-SHARED_CONSTANTS=""
+# Patch ALL copies of constants.js — the server and its nested shared package
+# may each have their own copy, and only the one the server process imports matters.
+PATCHED_ANY_CONSTANTS=0
 for candidate in \
   "$PAPERCLIP_ROOT/node_modules/@paperclipai/shared/dist/constants.js" \
   "$PAPERCLIP_ROOT/node_modules/@paperclipai/server/node_modules/@paperclipai/shared/dist/constants.js"; do
-  if [[ -f "$candidate" ]]; then SHARED_CONSTANTS="$candidate"; break; fi
-done
-
-if [[ -n "$SHARED_CONSTANTS" ]]; then
-  echo "→ Patching AGENT_ADAPTER_TYPES: $SHARED_CONSTANTS ..."
-  node - "$SHARED_CONSTANTS" <<'NODE_SCRIPT'
+  if [[ ! -f "$candidate" ]]; then continue; fi
+  echo "→ Patching AGENT_ADAPTER_TYPES: $candidate ..."
+  node - "$candidate" <<'NODE_SCRIPT'
 const fs = require("fs");
 const file = process.argv[2];
 let src = fs.readFileSync(file, "utf8");
 
 if (src.includes('"openrouter"')) {
-  console.log("  (AGENT_ADAPTER_TYPES already contains openrouter — skipping)");
+  console.log("  (already contains openrouter — skipping)");
   process.exit(0);
 }
 
@@ -80,7 +79,10 @@ if (patched === src) {
 fs.writeFileSync(file, patched, "utf8");
 console.log("  Done.");
 NODE_SCRIPT
-else
+  PATCHED_ANY_CONSTANTS=1
+done
+
+if [[ "$PATCHED_ANY_CONSTANTS" -eq 0 ]]; then
   echo "⚠  @paperclipai/shared constants not found — adapter type may be rejected by server."
 fi
 
