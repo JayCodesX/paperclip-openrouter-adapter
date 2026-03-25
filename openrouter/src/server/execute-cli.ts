@@ -440,7 +440,7 @@ export async function executeAgentLoop(
       "Workspace: {{context.paperclipWorkspace.cwd}}\n\n" +
       "Review the task above and complete it. " +
       "Post a comment when done or if you are blocked."
-    : wakeTaskId
+    : taskId
     ? "You are {{agent.name}}, a Paperclip AI agent.\n\n" +
       "Wake reason: {{context.wakeReason}}\n" +
       "Workspace: {{context.paperclipWorkspace.cwd}}\n\n" +
