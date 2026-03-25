@@ -245,103 +245,9 @@ export async function executeAgentLoop(ctx) {
     catch {
         // Non-fatal — spawn will fail with a clearer error if cwd is truly invalid
     }
-    let heartbeatCtx = null;
-    let assignedIssues = [];
     const taskId = (typeof context.taskId === "string" && context.taskId.trim()) ||
         (typeof context.issueId === "string" && context.issueId.trim()) ||
         null;
-    const wakeCommentId = (typeof context.wakeCommentId === "string" && context.wakeCommentId.trim()) ||
-        (typeof context.commentId === "string" && context.commentId.trim()) ||
-        null;
-    const paperclipApiUrl = (buildPaperclipEnv(agent).PAPERCLIP_API_URL ?? "").replace(/\/$/, "");
-    if (authToken && paperclipApiUrl) {
-        if (taskId) {
-            // Specific task assigned — fetch its full context
-            const qs = wakeCommentId ? `?wakeCommentId=${encodeURIComponent(wakeCommentId)}` : "";
-            const url = `${paperclipApiUrl}/api/issues/${taskId}/heartbeat-context${qs}`;
-            await onLog("stderr", `[orager] pre-fetch task: ${url}\n`);
-            try {
-                const resp = await fetch(url, {
-                    headers: { Authorization: `Bearer ${authToken}` },
-                    signal: AbortSignal.timeout(5000),
-                });
-                await onLog("stderr", `[orager] pre-fetch response: ${resp.status} ${resp.statusText}\n`);
-                if (resp.ok)
-                    heartbeatCtx = (await resp.json());
-            }
-            catch (err) {
-                await onLog("stderr", `[orager] pre-fetch error: ${String(err)}\n`);
-            }
-        }
-        else {
-            // No specific task — fetch the agent's assigned open issues so it can pick one
-            const url = `${paperclipApiUrl}/api/companies/${agent.companyId}/issues?assigneeAgentId=${encodeURIComponent(agent.id)}&status=todo,in_progress`;
-            await onLog("stderr", `[orager] pre-fetch assigned issues: ${url}\n`);
-            try {
-                const resp = await fetch(url, {
-                    headers: { Authorization: `Bearer ${authToken}` },
-                    signal: AbortSignal.timeout(5000),
-                });
-                await onLog("stderr", `[orager] pre-fetch response: ${resp.status} ${resp.statusText}\n`);
-                if (resp.ok) {
-                    const data = (await resp.json());
-                    assignedIssues = Array.isArray(data.issues) ? data.issues : Array.isArray(data) ? data : [];
-                }
-            }
-            catch (err) {
-                await onLog("stderr", `[orager] pre-fetch error: ${String(err)}\n`);
-            }
-        }
-    }
-    else {
-        await onLog("stderr", `[orager] pre-fetch skipped: taskId=${String(taskId)} authToken=${authToken ? "set" : "missing"} apiUrl=${paperclipApiUrl || "missing"}\n`);
-    }
-    function formatHeartbeatContext(hc) {
-        const lines = [];
-        const issue = hc.issue;
-        if (issue) {
-            lines.push(`## Current Task`);
-            if (issue.identifier)
-                lines.push(`**ID:** ${issue.identifier}`);
-            if (issue.title)
-                lines.push(`**Title:** ${issue.title}`);
-            if (issue.status)
-                lines.push(`**Status:** ${issue.status}`);
-            if (issue.priority)
-                lines.push(`**Priority:** ${issue.priority}`);
-            if (issue.description?.trim()) {
-                lines.push(`\n**Description:**\n${issue.description.trim()}`);
-            }
-        }
-        if (hc.ancestors && hc.ancestors.length > 0) {
-            lines.push(`\n## Parent Tasks`);
-            for (const a of hc.ancestors) {
-                lines.push(`- [${a.status ?? "?"}] ${a.identifier ?? ""} ${a.title ?? ""}`);
-            }
-        }
-        if (hc.project) {
-            lines.push(`\n## Project`);
-            lines.push(`**Name:** ${hc.project.name ?? ""}`);
-            if (hc.project.status)
-                lines.push(`**Status:** ${hc.project.status}`);
-            if (hc.project.targetDate)
-                lines.push(`**Target date:** ${hc.project.targetDate}`);
-        }
-        if (hc.goal) {
-            lines.push(`\n## Goal`);
-            lines.push(`**Title:** ${hc.goal.title ?? ""}`);
-            if (hc.goal.status)
-                lines.push(`**Status:** ${hc.goal.status}`);
-        }
-        if (hc.wakeComment?.body?.trim()) {
-            lines.push(`\n## Wake Comment (triggered this run)`);
-            if (hc.wakeComment.authorName)
-                lines.push(`**From:** ${hc.wakeComment.authorName}`);
-            lines.push(hc.wakeComment.body.trim());
-        }
-        return lines.join("\n");
-    }
-    const taskContextBlock = heartbeatCtx ? formatHeartbeatContext(heartbeatCtx) : null;
     // ── Instructions file ──────────────────────────────────────────────────────
     // Mirror claude-local's instructionsFilePath support: read the agent's
     // Instructions tab content and prepend it to the bootstrap on the first run.
@@ -357,49 +263,18 @@ export async function executeAgentLoop(ctx) {
         }
     }
     // ── Prompt ─────────────────────────────────────────────────────────────────
-    // When task context was pre-fetched, the default prompt uses it directly.
-    // When it wasn't (no auth token, or non-task heartbeat), fall back to the
-    // curl hint so a capable model can still fetch it via bash.
-    const POST_COMMENT_HINT = "When done or blocked, post a comment on the issue:\n" +
-        "  curl -s -X POST \"$PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID/comments\" \\\n" +
-        "    -H \"Authorization: Bearer $PAPERCLIP_API_KEY\" \\\n" +
-        "    -H \"Content-Type: application/json\" \\\n" +
-        "    -d '{\"body\": \"<your summary here>\"}'";
-    const DEFAULT_PROMPT_TEMPLATE = taskContextBlock
-        ? "You are {{agent.name}}, a Paperclip AI agent.\n\n" +
-            "{{taskContext}}\n\n" +
-            "Workspace: {{context.paperclipWorkspace.cwd}}\n\n" +
-            "Review the task above and complete it.\n\n" +
-            POST_COMMENT_HINT
-        : taskId
-            ? "You are {{agent.name}}, a Paperclip AI agent.\n\n" +
-                "Wake reason: {{context.wakeReason}}\n" +
-                "Workspace: {{context.paperclipWorkspace.cwd}}\n\n" +
-                "Fetch your current task details:\n" +
-                "  curl -s \"$PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID/heartbeat-context\" \\\n" +
-                "    -H \"Authorization: Bearer $PAPERCLIP_API_KEY\"\n\n" +
-                "Complete the task, then:\n\n" +
-                POST_COMMENT_HINT
-            : assignedIssues.length > 0
-                ? "You are {{agent.name}}, a Paperclip AI agent.\n\n" +
-                    "Wake reason: {{context.wakeReason}}\n" +
-                    "Workspace: {{context.paperclipWorkspace.cwd}}\n\n" +
-                    "No specific task was assigned for this run, but you have the following open issues assigned to you:\n\n" +
-                    `${JSON.stringify(assignedIssues, null, 2)}\n\n` +
-                    "Pick the highest priority one, fetch its full details using:\n" +
-                    "  curl -s \"$PAPERCLIP_API_URL/api/issues/<id>/heartbeat-context\" \\\n" +
-                    "    -H \"Authorization: Bearer $PAPERCLIP_API_KEY\"\n\n" +
-                    "Then complete it and post a comment when done."
-                : "You are {{agent.name}}, a Paperclip AI agent.\n\n" +
-                    "Wake reason: {{context.wakeReason}}\n" +
-                    "Workspace: {{context.paperclipWorkspace.cwd}}\n\n" +
-                    "No tasks are currently assigned to you. Nothing to do — finishing cleanly.";
+    // Keep the prompt minimal — the paperclip/SKILL.md skill (loaded via --add-dir)
+    // contains the full heartbeat procedure. Orager's native skills (get-task,
+    // list-issues, post-comment, update-issue-status) handle all API interaction.
+    const DEFAULT_PROMPT_TEMPLATE = "You are {{agent.name}}, a Paperclip AI agent.\n\n" +
+        "Wake reason: {{context.wakeReason}}\n" +
+        "Workspace: {{context.paperclipWorkspace.cwd}}\n\n" +
+        "Follow the Paperclip heartbeat procedure using your available skills.";
     const promptTemplate = asString(config.promptTemplate, DEFAULT_PROMPT_TEMPLATE);
     const templateData = {
         agentId: agent.id,
         companyId: agent.companyId,
         runId,
-        taskContext: taskContextBlock ?? "",
         company: { id: agent.companyId },
         agent,
         run: { id: runId, source: "on_demand" },
