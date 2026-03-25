@@ -153,7 +153,7 @@ UI_SERVER_DIST="$PAPERCLIP_ROOT/node_modules/@paperclipai/server/ui-dist"
 if [[ ! -d "$UI_PREBUILT" ]]; then
   echo "⚠  Pre-built UI not found at $UI_PREBUILT — skipping UI deployment."
   echo "   OpenRouter will appear in the adapter list but the model dropdown may not show."
-elif [[ -f "$UI_SERVER_DIST/index.html" ]] && diff -q "$UI_PREBUILT/index.html" "$UI_SERVER_DIST/index.html" >/dev/null 2>&1; then
+elif [[ -f "$UI_SERVER_DIST/index.html" ]] && diff -rq "$UI_PREBUILT" "$UI_SERVER_DIST" >/dev/null 2>&1; then
   echo "→ UI already up to date — skipping."
 else
   echo "→ Deploying pre-built UI to $UI_SERVER_DIST ..."
