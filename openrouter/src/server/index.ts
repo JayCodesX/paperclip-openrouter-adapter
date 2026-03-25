@@ -7,3 +7,5 @@ export { testEnvironment } from "./test.js";
 
 // Re-export the session codec so paperclip can import it from the server entry.
 export { sessionCodec } from "../index.js";
+
+export { listOpenRouterModels } from "./list-models.js";

@@ -112,6 +112,7 @@ const serverImport = `import {
   execute as openrouterExecute,
   testEnvironment as openrouterTestEnvironment,
   sessionCodec as openrouterSessionCodec,
+  listOpenRouterModels,
 } from "@paperclipai/adapter-openrouter/server";
 import { agentConfigurationDoc as openrouterAgentConfigurationDoc, models as openrouterModels } from "@paperclipai/adapter-openrouter";
 `;
@@ -124,6 +125,7 @@ const adapterDef = `const openrouterAdapter = {
   testEnvironment: openrouterTestEnvironment,
   sessionCodec: openrouterSessionCodec,
   models: openrouterModels,
+  listModels: listOpenRouterModels,
   supportsLocalAgentJwt: false,
   agentConfigurationDoc: openrouterAgentConfigurationDoc,
 };
