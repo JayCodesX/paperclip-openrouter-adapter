@@ -88,7 +88,8 @@ const DEFAULT_GRACE_SEC = 20;
 export async function executeAgentLoop(ctx) {
     const { runId, agent, runtime, config, context, onLog, onMeta, authToken } = ctx;
     // ── Config ─────────────────────────────────────────────────────────────────
-    const cliPath = asString(config.cliPath, DEFAULT_CLI);
+    // Support both cliPath and the generic "command" field from the Paperclip UI
+    const cliPath = asString(config.cliPath ?? config.command, DEFAULT_CLI);
     const model = asString(config.model, DEFAULT_MODEL);
     // Support both maxTurns and maxTurnsPerRun (alias for compatibility)
     const maxTurns = asNumber(config.maxTurnsPerRun ?? config.maxTurns, DEFAULT_MAX_TURNS);
