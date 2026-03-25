@@ -68,8 +68,8 @@ if (src.includes('"openrouter"')) {
 }
 
 const patched = src.replace(
-  /"hermes_local",\s*\n]/,
-  '"hermes_local",\n    "openrouter",\n]'
+  '    "hermes_local",\n];',
+  '    "hermes_local",\n    "openrouter",\n];'
 );
 
 if (patched === src) {
