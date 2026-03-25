@@ -25,15 +25,38 @@ else
   elif [[ -d "/usr/local/lib/node_modules/paperclipai" ]]; then
     PAPERCLIP_ROOT="/usr/local/lib/node_modules/paperclipai"
   else
+    # Try resolving via the paperclipai binary on PATH (works for any install method)
+    PAPERCLIPAI_BIN="$(command -v paperclipai 2>/dev/null || true)"
+    if [[ -n "$PAPERCLIPAI_BIN" ]]; then
+      # Follow symlinks to the real file, then walk up to the package root
+      REAL_BIN="$(readlink -f "$PAPERCLIPAI_BIN" 2>/dev/null || realpath "$PAPERCLIPAI_BIN" 2>/dev/null || echo "$PAPERCLIPAI_BIN")"
+      CANDIDATE="$(dirname "$(dirname "$REAL_BIN")")/lib/node_modules/paperclipai"
+      if [[ ! -d "$CANDIDATE" ]]; then
+        # The binary might live inside the package itself (e.g. dist/index.js)
+        CANDIDATE="$(dirname "$(dirname "$REAL_BIN")")"
+      fi
+      if [[ -d "$CANDIDATE" && -f "$CANDIDATE/package.json" ]]; then
+        PAPERCLIP_ROOT="$CANDIDATE"
+      fi
+    fi
+
     # Try npx cache (used when paperclipai is run via `npx paperclipai`)
-    NPX_HIT="$(find "$HOME/.npm/_npx" -maxdepth 4 -type d -name "paperclipai" 2>/dev/null \
-      | grep "node_modules/paperclipai$" | head -1)"
-    if [[ -d "$NPX_HIT" ]]; then
-      PAPERCLIP_ROOT="$NPX_HIT"
-    else
-      echo "ERROR: Cannot find paperclipai global install."
-      echo "       Set PAPERCLIP_DIR=/path/to/paperclipai and re-run."
-      echo "       (Tried: npm global, /opt/homebrew, /usr/local, ~/.npm/_npx cache)"
+    if [[ -z "${PAPERCLIP_ROOT:-}" ]]; then
+      NPX_HIT="$(find "$HOME/.npm/_npx" -maxdepth 4 -type d -name "paperclipai" 2>/dev/null \
+        | grep "node_modules/paperclipai$" | head -1)"
+      if [[ -d "$NPX_HIT" ]]; then
+        PAPERCLIP_ROOT="$NPX_HIT"
+      fi
+    fi
+
+    if [[ -z "${PAPERCLIP_ROOT:-}" ]]; then
+      echo "ERROR: Cannot find paperclipai. Install it first, then re-run:"
+      echo ""
+      echo "  npm install -g paperclipai"
+      echo "  bash install.sh"
+      echo ""
+      echo "Or point directly to your install:"
+      echo "  PAPERCLIP_DIR=/path/to/paperclipai bash install.sh"
       exit 1
     fi
   fi
