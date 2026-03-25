@@ -25,13 +25,37 @@ else
   elif [[ -d "/usr/local/lib/node_modules/paperclipai" ]]; then
     PAPERCLIP_ROOT="/usr/local/lib/node_modules/paperclipai"
   else
-    echo "ERROR: Cannot find paperclipai global install."
-    echo "       Set PAPERCLIP_DIR=/path/to/paperclipai and re-run."
-    exit 1
+    # Try npx cache (used when paperclipai is run via `npx paperclipai`)
+    NPX_HIT="$(find "$HOME/.npm/_npx" -maxdepth 4 -type d -name "paperclipai" 2>/dev/null \
+      | grep "node_modules/paperclipai$" | head -1)"
+    if [[ -d "$NPX_HIT" ]]; then
+      PAPERCLIP_ROOT="$NPX_HIT"
+    else
+      echo "ERROR: Cannot find paperclipai global install."
+      echo "       Set PAPERCLIP_DIR=/path/to/paperclipai and re-run."
+      echo "       (Tried: npm global, /opt/homebrew, /usr/local, ~/.npm/_npx cache)"
+      exit 1
+    fi
   fi
 fi
 
-ADAPTER_MODULES="$PAPERCLIP_ROOT/node_modules/@paperclipai"
+# The @paperclipai modules may be nested inside paperclipai's own node_modules
+# (traditional global install) or as siblings in a flat node_modules layout
+# (npx cache). Try nested first, then fall back to sibling.
+if [[ -d "$PAPERCLIP_ROOT/node_modules/@paperclipai" ]]; then
+  ADAPTER_MODULES="$PAPERCLIP_ROOT/node_modules/@paperclipai"
+elif [[ -d "$(dirname "$PAPERCLIP_ROOT")/@paperclipai" ]]; then
+  ADAPTER_MODULES="$(dirname "$PAPERCLIP_ROOT")/@paperclipai"
+else
+  echo "ERROR: Cannot find @paperclipai modules."
+  echo "       Searched: $PAPERCLIP_ROOT/node_modules/@paperclipai"
+  echo "                 $(dirname "$PAPERCLIP_ROOT")/@paperclipai"
+  exit 1
+fi
+
+# For registry patching, constants.js, and UI dist we also need to know
+# the top-level node_modules root (parent of @paperclipai).
+NODE_MODULES_ROOT="$(dirname "$ADAPTER_MODULES")"
 
 if [[ ! -d "$ADAPTER_MODULES" ]]; then
   echo "ERROR: $ADAPTER_MODULES does not exist."
@@ -52,6 +76,8 @@ cp -r "$SCRIPT_DIR/openrouter" "$ADAPTER_DEST"
 # may each have their own copy, and only the one the server process imports matters.
 PATCHED_ANY_CONSTANTS=0
 for candidate in \
+  "$NODE_MODULES_ROOT/@paperclipai/shared/dist/constants.js" \
+  "$NODE_MODULES_ROOT/@paperclipai/server/node_modules/@paperclipai/shared/dist/constants.js" \
   "$PAPERCLIP_ROOT/node_modules/@paperclipai/shared/dist/constants.js" \
   "$PAPERCLIP_ROOT/node_modules/@paperclipai/server/node_modules/@paperclipai/shared/dist/constants.js"; do
   if [[ ! -f "$candidate" ]]; then continue; fi
@@ -90,6 +116,7 @@ fi
 SERVER_REGISTRY=""
 
 for candidate in \
+  "$NODE_MODULES_ROOT/@paperclipai/server/dist/adapters/registry.js" \
   "$PAPERCLIP_ROOT/node_modules/@paperclipai/server/dist/adapters/registry.js" \
   "$PAPERCLIP_ROOT/dist/server/src/adapters/registry.js" \
   "$PAPERCLIP_ROOT/server/dist/adapters/registry.js"; do
@@ -157,7 +184,7 @@ fi
 # OpenRouter adapter wired into the adapter registry, model dropdown, and
 # config form.  This avoids fragile minified-bundle patching entirely.
 UI_PREBUILT="$SCRIPT_DIR/ui-dist"
-UI_SERVER_DIST="$PAPERCLIP_ROOT/node_modules/@paperclipai/server/ui-dist"
+UI_SERVER_DIST="$NODE_MODULES_ROOT/@paperclipai/server/ui-dist"
 
 if [[ ! -d "$UI_PREBUILT" ]]; then
   echo "⚠  Pre-built UI not found at $UI_PREBUILT — skipping UI deployment."
