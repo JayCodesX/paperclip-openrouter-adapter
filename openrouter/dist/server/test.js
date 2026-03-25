@@ -140,7 +140,7 @@ export async function testEnvironment(ctx) {
             level: "info",
             message: "OpenRouter API key is configured.",
         });
-        const model = asString(config.model, "deepseek/deepseek-chat-v3-2");
+        const model = asString(config.model, "deepseek/deepseek-chat-v3-0324");
         checks.push({
             code: "openrouter_model_configured",
             level: "info",
@@ -264,7 +264,7 @@ export async function testEnvironment(ctx) {
             c.code !== "openrouter_api_key_invalid");
     if (canRunProbe) {
         const dangerouslySkipPermissions = asBoolean(config.dangerouslySkipPermissions, false);
-        const model = asString(config.model, "deepseek/deepseek-chat-v3-2");
+        const model = asString(config.model, "deepseek/deepseek-chat-v3-0324");
         const probeEnv = {
             ...runtimeEnv,
             OPENROUTER_API_KEY: apiKey,

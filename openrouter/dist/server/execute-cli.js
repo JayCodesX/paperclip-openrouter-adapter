@@ -72,7 +72,7 @@ function ensurePathInEnv(env) {
     return { ...env, PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin" };
 }
 const DEFAULT_CLI = "orager";
-const DEFAULT_MODEL = "deepseek/deepseek-chat-v3-2";
+const DEFAULT_MODEL = "deepseek/deepseek-chat-v3-0324";
 const DEFAULT_MAX_TURNS = 20;
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_TIMEOUT_SEC = 300; // 5 min — agent loops take longer than single completions

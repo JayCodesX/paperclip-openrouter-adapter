@@ -102,7 +102,7 @@ All fields go in the agent's adapter config block. Only `apiKey` is required (or
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `apiKey` | string | — | **Required.** OpenRouter API key. Use a `secret_ref` in production. |
-| `model` | string | `deepseek/deepseek-chat-v3-2` | Any OpenRouter model ID. |
+| `model` | string | `deepseek/deepseek-chat-v3-0324` | Any OpenRouter model ID. |
 | `models` | string[] | — | Fallback models tried in order if the primary fails. |
 | `systemPrompt` | string | built-in | System prompt template. Supports `{{agent.id}}`, `{{agent.name}}`, etc. |
 | `promptTemplate` | string | built-in | User message sent every run. Same template variables available. |
@@ -182,7 +182,7 @@ provider:
 
 | Model | ID |
 |---|---|
-| DeepSeek V3.2 | `deepseek/deepseek-chat-v3-2` |
+| DeepSeek V3.2 | `deepseek/deepseek-chat-v3-0324` |
 | DeepSeek R1 | `deepseek/deepseek-r1` |
 | Claude Sonnet 4.6 | `anthropic/claude-sonnet-4-6` |
 | Claude Opus 4.6 | `anthropic/claude-opus-4-6` |

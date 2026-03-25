@@ -3,8 +3,9 @@ export const label = "OpenRouter (orager)";
 // Any valid OpenRouter model ID works. Full list at https://openrouter.ai/models
 export const models = [
     // DeepSeek
-    { id: "deepseek/deepseek-chat-v3-2", label: "DeepSeek V3.2" },
-    { id: "deepseek/deepseek-chat-v3-2:free", label: "DeepSeek V3.2 (free)" },
+    { id: "deepseek/deepseek-chat-v3-0324", label: "DeepSeek V3.2 (0324)" },
+    { id: "deepseek/deepseek-chat-v3-0324:free", label: "DeepSeek V3.2 (free)" },
+    { id: "deepseek/deepseek-chat", label: "DeepSeek V3 (latest)" },
     { id: "deepseek/deepseek-r1", label: "DeepSeek R1 (reasoning)" },
     { id: "deepseek/deepseek-r1:free", label: "DeepSeek R1 (free, reasoning)" },
     // Anthropic
@@ -36,7 +37,7 @@ Requires: orager installed and on PATH (npm install -g @paperclipai/orager)
 
 ## Core fields
 - apiKey (string, required): OpenRouter API key. Store as a secret_ref in production.
-- model (string, optional): Any OpenRouter model ID (default: deepseek/deepseek-chat-v3-2).
+- model (string, optional): Any OpenRouter model ID (default: deepseek/deepseek-chat-v3-0324).
   Append suffixes: :free (free tier), :nitro (fastest), :floor (cheapest), :thinking (reasoning).
 - models (string[], optional): Fallback model list tried in order if the primary fails.
 - promptTemplate (string, optional): User message template. Supports {{agent.id}}, {{agent.name}}, {{runId}}, etc.

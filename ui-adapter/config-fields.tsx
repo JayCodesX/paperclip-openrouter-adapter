@@ -57,7 +57,7 @@ export function OpenRouterConfigFields({
                 : mark("adapterConfig", "model", e.target.value || undefined)
             }
           >
-            <option value="">Default (deepseek/deepseek-chat-v3-2)</option>
+            <option value="">Default (deepseek/deepseek-chat-v3-0324)</option>
             {models.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.label}
@@ -78,7 +78,7 @@ export function OpenRouterConfigFields({
             }
             immediate
             className={inputClass}
-            placeholder="deepseek/deepseek-chat-v3-2"
+            placeholder="deepseek/deepseek-chat-v3-0324"
           />
         )}
       </Field>
