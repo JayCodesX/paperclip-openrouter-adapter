@@ -249,19 +249,9 @@ export async function executeAgentLoop(ctx) {
         (typeof context.issueId === "string" && context.issueId.trim()) ||
         null;
     // ── Instructions file ──────────────────────────────────────────────────────
-    // Mirror claude-local's instructionsFilePath support: read the agent's
-    // Instructions tab content and prepend it to the bootstrap on the first run.
+    // Passed to orager via --system-prompt-file so it lands in the system prompt
+    // (not the user message) — mirroring claude-local's --append-system-prompt-file.
     const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
-    let instructionsContent = "";
-    if (instructionsFilePath) {
-        try {
-            instructionsContent = await fs.readFile(instructionsFilePath, "utf-8");
-        }
-        catch (err) {
-            const reason = err instanceof Error ? err.message : String(err);
-            await onLog("stderr", `[paperclip] Warning: could not read agent instructions file "${instructionsFilePath}": ${reason}\n`);
-        }
-    }
     // ── Prompt ─────────────────────────────────────────────────────────────────
     // Keep the prompt minimal — the paperclip/SKILL.md skill (loaded via --add-dir)
     // contains the full heartbeat procedure. Orager's native skills (get-task,
@@ -288,10 +278,10 @@ export async function executeAgentLoop(ctx) {
     // ── Session ────────────────────────────────────────────────────────────────
     const runtimeSessionParams = parseObject(runtime.sessionParams);
     const previousSessionId = asString(runtimeSessionParams.oragerSessionId, "");
-    // Only prepend instructions + bootstrap + handoff on the first run
+    // Only prepend bootstrap + handoff on the first run
+    // (instructions go to --system-prompt-file, not the user message)
     const isFirstRun = !previousSessionId;
     const prompt = joinPromptSections([
-        isFirstRun && instructionsContent ? instructionsContent : null,
         isFirstRun ? renderedBootstrap : null,
         isFirstRun ? sessionHandoff : null,
         userMessage,
@@ -310,6 +300,8 @@ export async function executeAgentLoop(ctx) {
     args.push("--max-retries", String(maxRetries));
     if (previousSessionId)
         args.push("--resume", previousSessionId);
+    if (instructionsFilePath)
+        args.push("--system-prompt-file", instructionsFilePath);
     if (dangerouslySkipPermissions)
         args.push("--dangerously-skip-permissions");
     if (sandboxRoot)
@@ -529,6 +521,8 @@ export async function executeAgentLoop(ctx) {
         }
         let resultEvent = null;
         let sessionId = "";
+        let resolvedModel = "";
+        let sessionLost = false;
         let timedOut = false;
         let timeoutTimer;
         let graceTimer;
@@ -557,9 +551,11 @@ export async function executeAgentLoop(ctx) {
                 void onLog("stdout", line + "\n");
                 try {
                     const event = JSON.parse(line);
-                    if (event.type === "system" &&
-                        typeof event.session_id === "string") {
+                    if (event.type === "system" && typeof event.session_id === "string") {
                         sessionId = event.session_id;
+                        if (typeof event.model === "string" && event.model) {
+                            resolvedModel = event.model;
+                        }
                     }
                     if (event.type === "result") {
                         resultEvent = event;
@@ -571,7 +567,14 @@ export async function executeAgentLoop(ctx) {
             }
         });
         proc.stderr?.on("data", (chunk) => {
-            void onLog("stderr", typeof chunk === "string" ? chunk : chunk.toString("utf8"));
+            const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+            // Orager silently starts a fresh session when the requested session isn't
+            // found. Detect this so we can clear the stale session ID on Paperclip's
+            // side, ensuring the next run is treated as a fresh start (with
+            // instructions re-injected via --system-prompt-file).
+            if (text.includes("not found, starting fresh"))
+                sessionLost = true;
+            void onLog("stderr", text);
         });
         proc.on("close", (code, signal) => {
             if (timeoutTimer !== undefined)
@@ -631,6 +634,10 @@ export async function executeAgentLoop(ctx) {
             // partially, the process exited cleanly, so we preserve exitCode 0 and
             // clear the session so it won't be resumed.
             const softStop = isSuccess || isMaxTurns;
+            // If orager started a fresh session because the previous one wasn't found,
+            // clear the session on Paperclip's side too so the next run is treated as
+            // first-run (instructions re-injected, bootstrap included).
+            const clearSession = isMaxTurns || sessionLost;
             const newSessionParams = sessionId
                 ? {
                     oragerSessionId: sessionId,
@@ -647,7 +654,8 @@ export async function executeAgentLoop(ctx) {
                 errorMessage: softStop
                     ? undefined
                     : `Agent loop ended: ${subtype}${resultText ? ` — ${resultText}` : ""}`,
-                clearSession: isMaxTurns,
+                clearSession,
+                model: resolvedModel || undefined,
                 usage: usageRaw
                     ? {
                         inputTokens: typeof usageRaw.input_tokens === "number"
