@@ -104,7 +104,14 @@ const file = process.argv[2];
 let src = fs.readFileSync(file, "utf8");
 
 if (src.includes("adapter-openrouter")) {
-  console.log("  (server registry already contains openrouter — skipping)");
+  // Already patched — but ensure supportsLocalAgentJwt is true (older installs had false)
+  if (src.includes("supportsLocalAgentJwt: false")) {
+    src = src.replace("supportsLocalAgentJwt: false", "supportsLocalAgentJwt: true");
+    fs.writeFileSync(file, src, "utf8");
+    console.log("  (updated supportsLocalAgentJwt: false → true)");
+  } else {
+    console.log("  (server registry already contains openrouter — skipping)");
+  }
   process.exit(0);
 }
 
