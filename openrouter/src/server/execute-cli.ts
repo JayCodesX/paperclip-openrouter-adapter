@@ -323,6 +323,89 @@ export async function executeAgentLoop(
     // Non-fatal — spawn will fail with a clearer error if cwd is truly invalid
   }
 
+  // ── Pre-fetch task context from Paperclip API ──────────────────────────────
+  // Fetch the full issue details server-side so the prompt always contains
+  // real task context — regardless of model tool-use capability.
+  interface HeartbeatContext {
+    issue?: {
+      id: string;
+      identifier?: string;
+      title?: string;
+      description?: string;
+      status?: string;
+      priority?: string;
+    };
+    ancestors?: Array<{ identifier?: string; title?: string; status?: string }>;
+    project?: { name?: string; status?: string; targetDate?: string } | null;
+    goal?: { title?: string; status?: string; level?: string } | null;
+    wakeComment?: { body?: string; authorName?: string } | null;
+  }
+  let heartbeatCtx: HeartbeatContext | null = null;
+  const taskId =
+    (typeof context.taskId === "string" && context.taskId.trim()) ||
+    (typeof context.issueId === "string" && context.issueId.trim()) ||
+    null;
+  const wakeCommentId =
+    (typeof context.wakeCommentId === "string" && context.wakeCommentId.trim()) ||
+    (typeof context.commentId === "string" && context.commentId.trim()) ||
+    null;
+
+  if (taskId && authToken) {
+    const paperclipApiUrl = (buildPaperclipEnv(agent).PAPERCLIP_API_URL ?? "").replace(/\/$/, "");
+    if (paperclipApiUrl) {
+      try {
+        const qs = wakeCommentId ? `?wakeCommentId=${encodeURIComponent(wakeCommentId)}` : "";
+        const resp = await fetch(`${paperclipApiUrl}/issues/${taskId}/heartbeat-context${qs}`, {
+          headers: { Authorization: `Bearer ${authToken}` },
+          signal: AbortSignal.timeout(5000),
+        });
+        if (resp.ok) heartbeatCtx = (await resp.json()) as HeartbeatContext;
+      } catch {
+        // Non-fatal — prompt will fall back to env-var hint
+      }
+    }
+  }
+
+  function formatHeartbeatContext(hc: HeartbeatContext): string {
+    const lines: string[] = [];
+    const issue = hc.issue;
+    if (issue) {
+      lines.push(`## Current Task`);
+      if (issue.identifier) lines.push(`**ID:** ${issue.identifier}`);
+      if (issue.title) lines.push(`**Title:** ${issue.title}`);
+      if (issue.status) lines.push(`**Status:** ${issue.status}`);
+      if (issue.priority) lines.push(`**Priority:** ${issue.priority}`);
+      if (issue.description?.trim()) {
+        lines.push(`\n**Description:**\n${issue.description.trim()}`);
+      }
+    }
+    if (hc.ancestors && hc.ancestors.length > 0) {
+      lines.push(`\n## Parent Tasks`);
+      for (const a of hc.ancestors) {
+        lines.push(`- [${a.status ?? "?"}] ${a.identifier ?? ""} ${a.title ?? ""}`);
+      }
+    }
+    if (hc.project) {
+      lines.push(`\n## Project`);
+      lines.push(`**Name:** ${hc.project.name ?? ""}`);
+      if (hc.project.status) lines.push(`**Status:** ${hc.project.status}`);
+      if (hc.project.targetDate) lines.push(`**Target date:** ${hc.project.targetDate}`);
+    }
+    if (hc.goal) {
+      lines.push(`\n## Goal`);
+      lines.push(`**Title:** ${hc.goal.title ?? ""}`);
+      if (hc.goal.status) lines.push(`**Status:** ${hc.goal.status}`);
+    }
+    if (hc.wakeComment?.body?.trim()) {
+      lines.push(`\n## Wake Comment (triggered this run)`);
+      if (hc.wakeComment.authorName) lines.push(`**From:** ${hc.wakeComment.authorName}`);
+      lines.push(hc.wakeComment.body.trim());
+    }
+    return lines.join("\n");
+  }
+
+  const taskContextBlock = heartbeatCtx ? formatHeartbeatContext(heartbeatCtx) : null;
+
   // ── Instructions file ──────────────────────────────────────────────────────
   // Mirror claude-local's instructionsFilePath support: read the agent's
   // Instructions tab content and prepend it to the bootstrap on the first run.
@@ -341,24 +424,31 @@ export async function executeAgentLoop(
   }
 
   // ── Prompt ─────────────────────────────────────────────────────────────────
-  const DEFAULT_PROMPT_TEMPLATE =
-    "You are agent {{agent.id}} ({{agent.name}}). " +
-    "You are running as a Paperclip AI agent.\n\n" +
-    "Current task ID: {{context.taskId}}\n" +
-    "Wake reason: {{context.wakeReason}}\n" +
-    "Workspace: {{context.paperclipWorkspace.cwd}}\n\n" +
-    "Use the tools available to you (bash, file system, etc.) to fetch the " +
-    "task details via the Paperclip API and complete the task. " +
-    "The task details can be fetched with:\n" +
-    "  curl -s \"$PAPERCLIP_API_URL/v1/tasks/$PAPERCLIP_TASK_ID\" \\\n" +
-    "    -H \"Authorization: Bearer $PAPERCLIP_API_KEY\"\n\n" +
-    "Proceed with your work.";
+  // When task context was pre-fetched, the default prompt uses it directly.
+  // When it wasn't (no auth token, or non-task heartbeat), fall back to the
+  // curl hint so a capable model can still fetch it via bash.
+  const DEFAULT_PROMPT_TEMPLATE = taskContextBlock
+    ? "You are {{agent.name}}, a Paperclip AI agent.\n\n" +
+      "{{taskContext}}\n\n" +
+      "Workspace: {{context.paperclipWorkspace.cwd}}\n\n" +
+      "Review the task above and complete it. " +
+      "Post a comment when done or if you are blocked."
+    : "You are agent {{agent.id}} ({{agent.name}}). " +
+      "You are running as a Paperclip AI agent.\n\n" +
+      "Current task ID: {{context.taskId}}\n" +
+      "Wake reason: {{context.wakeReason}}\n" +
+      "Workspace: {{context.paperclipWorkspace.cwd}}\n\n" +
+      "Fetch the task details, then complete it:\n" +
+      "  curl -s \"$PAPERCLIP_API_URL/issues/$PAPERCLIP_TASK_ID/heartbeat-context\" \\\n" +
+      "    -H \"Authorization: Bearer $PAPERCLIP_API_KEY\"\n\n" +
+      "Proceed with your work.";
 
   const promptTemplate = asString(config.promptTemplate, DEFAULT_PROMPT_TEMPLATE);
   const templateData = {
     agentId: agent.id,
     companyId: agent.companyId,
     runId,
+    taskContext: taskContextBlock ?? "",
     company: { id: agent.companyId },
     agent,
     run: { id: runId, source: "on_demand" },

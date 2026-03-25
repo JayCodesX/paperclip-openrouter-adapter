@@ -126,7 +126,7 @@ const adapterDef = `const openrouterAdapter = {
   sessionCodec: openrouterSessionCodec,
   models: openrouterModels,
   listModels: listOpenRouterModels,
-  supportsLocalAgentJwt: false,
+  supportsLocalAgentJwt: true,
   agentConfigurationDoc: openrouterAgentConfigurationDoc,
 };
 
