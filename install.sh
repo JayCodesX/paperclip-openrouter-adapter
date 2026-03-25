@@ -198,6 +198,24 @@ if (!src.includes('P==="cursor"||P==="openrouter"')) {
   changed = true;
 }
 
+// Add openrouter to isLocal check so ModelDropdown and Command field appear
+// The AgentConfigForm isLocal uniquely has the pi_local→cursor sequence
+// (AgentDetail's isLocal has hermes_local→cursor instead)
+{
+  const m = src.match(/(\w+)==="pi_local"\|\|\1==="cursor"/);
+  if (m) {
+    const v = m[1];
+    const needle = v + '==="pi_local"||' + v + '==="cursor"';
+    const replacement = v + '==="pi_local"||' + v + '==="cursor"||' + v + '==="openrouter"';
+    if (!src.includes(replacement)) {
+      src = src.replace(needle, replacement);
+      changed = true;
+    }
+  } else {
+    console.log("  ⚠ Could not find isLocal check — Model dropdown may not appear.");
+  }
+}
+
 if (!changed) {
   console.log("  (UI bundle already patched — skipping)");
   process.exit(0);
