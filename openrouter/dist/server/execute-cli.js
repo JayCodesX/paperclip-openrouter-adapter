@@ -337,15 +337,20 @@ export async function executeAgentLoop(ctx) {
             "Workspace: {{context.paperclipWorkspace.cwd}}\n\n" +
             "Review the task above and complete it. " +
             "Post a comment when done or if you are blocked."
-        : "You are agent {{agent.id}} ({{agent.name}}). " +
-            "You are running as a Paperclip AI agent.\n\n" +
-            "Current task ID: {{context.taskId}}\n" +
-            "Wake reason: {{context.wakeReason}}\n" +
-            "Workspace: {{context.paperclipWorkspace.cwd}}\n\n" +
-            "Fetch the task details, then complete it:\n" +
-            "  curl -s \"$PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID/heartbeat-context\" \\\n" +
-            "    -H \"Authorization: Bearer $PAPERCLIP_API_KEY\"\n\n" +
-            "Proceed with your work.";
+        : wakeTaskId
+            ? "You are {{agent.name}}, a Paperclip AI agent.\n\n" +
+                "Wake reason: {{context.wakeReason}}\n" +
+                "Workspace: {{context.paperclipWorkspace.cwd}}\n\n" +
+                "Fetch your current task details, then complete it:\n" +
+                "  curl -s \"$PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID/heartbeat-context\" \\\n" +
+                "    -H \"Authorization: Bearer $PAPERCLIP_API_KEY\"\n\n" +
+                "Proceed with your work."
+            : "You are {{agent.name}}, a Paperclip AI agent.\n\n" +
+                "Wake reason: {{context.wakeReason}}\n" +
+                "Workspace: {{context.paperclipWorkspace.cwd}}\n\n" +
+                "No specific task was assigned for this run. " +
+                "Check for any open issues assigned to you and work on the highest priority one, " +
+                "or if there is nothing to do, finish the run cleanly.";
     const promptTemplate = asString(config.promptTemplate, DEFAULT_PROMPT_TEMPLATE);
     const templateData = {
         agentId: agent.id,
