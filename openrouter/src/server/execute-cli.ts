@@ -2,6 +2,12 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+// skills/ dir is at the root of the adapter package (two levels up from dist/server/)
+const SKILLS_DIR = path.resolve(__dirname, "..", "..", "skills");
 import type {
   AdapterExecutionContext,
   AdapterExecutionResult,
@@ -250,10 +256,14 @@ export async function executeAgentLoop(
     ? config.toolsFiles.filter((f: unknown) => typeof f === "string")
     : [];
 
-  // Skills directories
-  const addDirs = Array.isArray(config.addDirs)
-    ? config.addDirs.filter((d: unknown) => typeof d === "string")
-    : [];
+  // Skills directories — always include bundled Paperclip skills so the
+  // model gets native get-task, post-comment, list-issues, update-issue-status tools
+  const addDirs: string[] = [SKILLS_DIR];
+  if (Array.isArray(config.addDirs)) {
+    for (const d of config.addDirs) {
+      if (typeof d === "string" && d.trim()) addDirs.push(d.trim());
+    }
+  }
 
   // Extra passthrough args (extraArgs or args alias)
   const extraArgs = (() => {

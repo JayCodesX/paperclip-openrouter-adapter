@@ -94,6 +94,49 @@ echo "→ Copying adapter to $ADAPTER_DEST ..."
 rm -rf "$ADAPTER_DEST"
 cp -r "$SCRIPT_DIR/openrouter" "$ADAPTER_DEST"
 
+# ── 1b. Copy orager skills into adapter package ───────────────────────────────
+# Our exec-based skills (get-task, post-comment, list-issues, update-issue-status)
+# live in skills/.orager/skills/ relative to this repo.
+ORAGER_SKILLS_DEST="$ADAPTER_DEST/skills/.orager/skills"
+mkdir -p "$ORAGER_SKILLS_DEST"
+if [[ -d "$SCRIPT_DIR/skills/.orager/skills" ]]; then
+  cp -r "$SCRIPT_DIR/skills/.orager/skills/"* "$ORAGER_SKILLS_DEST/" 2>/dev/null || true
+  echo "→ Copied orager exec skills to $ORAGER_SKILLS_DEST"
+fi
+
+# Copy the full suite of skills from the claude-local adapter so orager gets
+# the same Paperclip procedural knowledge without us having to re-teach it.
+# Skills with exec: become native callable tools; others are injected as system
+# prompt context (see orager/src/skills.ts buildSkillsSystemPrompt).
+CLAUDE_LOCAL_SKILLS=""
+for candidate in \
+  "$ADAPTER_MODULES/adapter-claude-local/skills" \
+  "$NODE_MODULES_ROOT/@paperclipai/adapter-claude-local/skills" \
+  "$PAPERCLIP_ROOT/node_modules/@paperclipai/adapter-claude-local/skills"; do
+  if [[ -d "$candidate" ]]; then
+    CLAUDE_LOCAL_SKILLS="$candidate"
+    break
+  fi
+done
+
+if [[ -n "$CLAUDE_LOCAL_SKILLS" ]]; then
+  echo "→ Copying claude-local skills from $CLAUDE_LOCAL_SKILLS ..."
+  for skill_dir in "$CLAUDE_LOCAL_SKILLS"/*/; do
+    skill_name=$(basename "$skill_dir")
+    dest_skill="$ORAGER_SKILLS_DEST/$skill_name"
+    # Don't overwrite our own exec-based skills
+    if [[ -d "$dest_skill" ]]; then
+      echo "  ✓ $skill_name (kept existing orager version)"
+      continue
+    fi
+    mkdir -p "$dest_skill"
+    cp -r "${skill_dir}." "$dest_skill/" 2>/dev/null || cp -r "$skill_dir"* "$dest_skill/" 2>/dev/null || true
+    echo "  ✓ $skill_name"
+  done
+else
+  echo "  ⚠ claude-local adapter skills not found — skipping (orager exec skills still installed)"
+fi
+
 # ── 2. Patch Zod adapterType enum in @paperclipai/shared ─────────────────────
 # Patch ALL copies of constants.js — the server and its nested shared package
 # may each have their own copy, and only the one the server process imports matters.
