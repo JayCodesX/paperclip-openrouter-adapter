@@ -154,14 +154,26 @@ const file = process.argv[2];
 let src = fs.readFileSync(file, "utf8");
 
 if (src.includes("adapter-openrouter")) {
-  // Already patched — but ensure supportsLocalAgentJwt is true (older installs had false)
+  let changed = false;
   if (src.includes("supportsLocalAgentJwt: false")) {
     src = src.replace("supportsLocalAgentJwt: false", "supportsLocalAgentJwt: true");
-    fs.writeFileSync(file, src, "utf8");
+    changed = true;
     console.log("  (updated supportsLocalAgentJwt: false → true)");
-  } else {
-    console.log("  (server registry already contains openrouter — skipping)");
   }
+  if (!src.includes("listOpenRouterSkills")) {
+    src = src.replace(
+      "listOpenRouterModels,\n} from \"@paperclipai/adapter-openrouter/server\";",
+      "listOpenRouterModels,\n  listOpenRouterSkills,\n  syncOpenRouterSkills,\n} from \"@paperclipai/adapter-openrouter/server\";"
+    );
+    src = src.replace(
+      "listModels: listOpenRouterModels,",
+      "listModels: listOpenRouterModels,\n  listSkills: listOpenRouterSkills,\n  syncSkills: syncOpenRouterSkills,"
+    );
+    changed = true;
+    console.log("  (added listSkills/syncSkills)");
+  }
+  if (!changed) console.log("  (server registry already up to date — skipping)");
+  if (changed) fs.writeFileSync(file, src, "utf8");
   process.exit(0);
 }
 
@@ -170,6 +182,8 @@ const serverImport = `import {
   testEnvironment as openrouterTestEnvironment,
   sessionCodec as openrouterSessionCodec,
   listOpenRouterModels,
+  listOpenRouterSkills,
+  syncOpenRouterSkills,
 } from "@paperclipai/adapter-openrouter/server";
 import { agentConfigurationDoc as openrouterAgentConfigurationDoc, models as openrouterModels } from "@paperclipai/adapter-openrouter";
 `;
@@ -183,6 +197,8 @@ const adapterDef = `const openrouterAdapter = {
   sessionCodec: openrouterSessionCodec,
   models: openrouterModels,
   listModels: listOpenRouterModels,
+  listSkills: listOpenRouterSkills,
+  syncSkills: syncOpenRouterSkills,
   supportsLocalAgentJwt: true,
   agentConfigurationDoc: openrouterAgentConfigurationDoc,
 };

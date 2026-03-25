@@ -9,3 +9,5 @@ export { testEnvironment } from "./test.js";
 export { sessionCodec } from "../index.js";
 
 export { listOpenRouterModels } from "./list-models.js";
+
+export { listOpenRouterSkills, syncOpenRouterSkills } from "./skills.js";

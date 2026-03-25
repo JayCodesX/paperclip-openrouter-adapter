@@ -452,20 +452,28 @@ export async function executeAgentLoop(
   // When task context was pre-fetched, the default prompt uses it directly.
   // When it wasn't (no auth token, or non-task heartbeat), fall back to the
   // curl hint so a capable model can still fetch it via bash.
+  const POST_COMMENT_HINT =
+    "When done or blocked, post a comment on the issue:\n" +
+    "  curl -s -X POST \"$PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID/comments\" \\\n" +
+    "    -H \"Authorization: Bearer $PAPERCLIP_API_KEY\" \\\n" +
+    "    -H \"Content-Type: application/json\" \\\n" +
+    "    -d '{\"body\": \"<your summary here>\"}'";
+
   const DEFAULT_PROMPT_TEMPLATE = taskContextBlock
     ? "You are {{agent.name}}, a Paperclip AI agent.\n\n" +
       "{{taskContext}}\n\n" +
       "Workspace: {{context.paperclipWorkspace.cwd}}\n\n" +
-      "Review the task above and complete it. " +
-      "Post a comment when done or if you are blocked."
+      "Review the task above and complete it.\n\n" +
+      POST_COMMENT_HINT
     : taskId
     ? "You are {{agent.name}}, a Paperclip AI agent.\n\n" +
       "Wake reason: {{context.wakeReason}}\n" +
       "Workspace: {{context.paperclipWorkspace.cwd}}\n\n" +
-      "Fetch your current task details, then complete it:\n" +
+      "Fetch your current task details:\n" +
       "  curl -s \"$PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID/heartbeat-context\" \\\n" +
       "    -H \"Authorization: Bearer $PAPERCLIP_API_KEY\"\n\n" +
-      "Proceed with your work."
+      "Complete the task, then:\n\n" +
+      POST_COMMENT_HINT
     : assignedIssues.length > 0
     ? "You are {{agent.name}}, a Paperclip AI agent.\n\n" +
       "Wake reason: {{context.wakeReason}}\n" +
