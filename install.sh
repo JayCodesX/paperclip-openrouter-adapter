@@ -141,79 +141,23 @@ else
   exit 1
 fi
 
-# ── 3. Patch UI bundle ────────────────────────────────────────────────────────
-UI_BUNDLE=""
-UI_DIST="$PAPERCLIP_ROOT/node_modules/@paperclipai/server/ui-dist/assets"
-if [[ -d "$UI_DIST" ]]; then
-  for f in "$UI_DIST"/*.js; do
-    if grep -q '"claude_local","codex_local"' "$f" 2>/dev/null; then
-      UI_BUNDLE="$f"
-      break
-    fi
-  done
-fi
+# ── 3. Deploy pre-built UI ────────────────────────────────────────────────────
+# Replace the installed ui-dist with our pre-built bundle that has the
+# OpenRouter adapter wired into the adapter registry, model dropdown, and
+# config form.  This avoids fragile minified-bundle patching entirely.
+UI_PREBUILT="$SCRIPT_DIR/ui-dist"
+UI_SERVER_DIST="$PAPERCLIP_ROOT/node_modules/@paperclipai/server/ui-dist"
 
-if [[ -n "$UI_BUNDLE" ]]; then
-  echo "→ Patching UI bundle: $(basename "$UI_BUNDLE") ..."
-  node - "$UI_BUNDLE" <<'NODE_SCRIPT'
-const fs = require("fs");
-const file = process.argv[2];
-let src = fs.readFileSync(file, "utf8");
-
-let changed = false;
-
-// Add "openrouter" to the full adapter types list (b1)
-if (!src.includes('"hermes_local","openrouter"]')) {
-  src = src.replace(
-    /"openclaw_gateway","hermes_local"\]/,
-    '"openclaw_gateway","hermes_local","openrouter"]'
-  );
-  changed = true;
-}
-
-// Add "openrouter" to the enabled adapters Set (pZe) so it isn't grayed out
-if (!src.includes('"cursor","openrouter"]')) {
-  src = src.replace(
-    /new Set\(\["claude_local","codex_local","gemini_local","opencode_local","cursor"\]\)/,
-    'new Set(["claude_local","codex_local","gemini_local","opencode_local","cursor","openrouter"])'
-  );
-  changed = true;
-}
-
-// Add display label so it shows as "OpenRouter (orager)" not "openrouter"
-if (!src.includes('openrouter:"OpenRouter')) {
-  src = src.replace(
-    /(vle=\{[^}]*)http:"HTTP"\s*\}/,
-    '$1http:"HTTP",openrouter:"OpenRouter (orager)"}'
-  );
-  changed = true;
-}
-
-// Add openrouter to the isLocal condition (inlined by minifier in multiple places).
-// isLocal gates the Command field, ModelDropdown, and Permissions section.
-// Use a negative lookahead so already-patched occurrences are skipped and only
-// remaining un-patched ones are updated (handles partial previous installs too).
-{
-  const origPattern = /P==="claude_local"\|\|P==="codex_local"\|\|P==="gemini_local"\|\|P==="opencode_local"\|\|P==="cursor"(?!\|\|P==="openrouter")/g;
-  if (origPattern.test(src)) {
-    src = src.replace(
-      /P==="claude_local"\|\|P==="codex_local"\|\|P==="gemini_local"\|\|P==="opencode_local"\|\|P==="cursor"(?!\|\|P==="openrouter")/g,
-      'P==="claude_local"||P==="codex_local"||P==="gemini_local"||P==="opencode_local"||P==="cursor"||P==="openrouter"'
-    );
-    changed = true;
-  }
-}
-
-if (!changed) {
-  console.log("  (UI bundle already patched — skipping)");
-  process.exit(0);
-}
-
-fs.writeFileSync(file, src, "utf8");
-console.log("  Done.");
-NODE_SCRIPT
+if [[ ! -d "$UI_PREBUILT" ]]; then
+  echo "⚠  Pre-built UI not found at $UI_PREBUILT — skipping UI deployment."
+  echo "   OpenRouter will appear in the adapter list but the model dropdown may not show."
+elif [[ -f "$UI_SERVER_DIST/index.html" ]] && diff -q "$UI_PREBUILT/index.html" "$UI_SERVER_DIST/index.html" >/dev/null 2>&1; then
+  echo "→ UI already up to date — skipping."
 else
-  echo "⚠  UI bundle not found — OpenRouter will not appear in the adapter dropdown."
+  echo "→ Deploying pre-built UI to $UI_SERVER_DIST ..."
+  rm -rf "$UI_SERVER_DIST"
+  cp -r "$UI_PREBUILT" "$UI_SERVER_DIST"
+  echo "  Done."
 fi
 
 echo ""
