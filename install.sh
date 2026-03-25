@@ -104,61 +104,34 @@ if [[ -d "$SCRIPT_DIR/skills/.orager/skills" ]]; then
   echo "→ Copied orager exec skills to $ORAGER_SKILLS_DEST"
 fi
 
-# Copy the full suite of skills from the claude-local adapter so orager gets
-# the same Paperclip procedural knowledge without us having to re-teach it.
-# Skills with exec: become native callable tools; others are injected as system
-# prompt context (see orager/src/skills.ts buildSkillsSystemPrompt).
-#
-# Sentinel file: $ORAGER_SKILLS_DEST/.claude-local-version stores the version
-# of adapter-claude-local that was last copied. Re-copy only when the installed
-# version differs (i.e. Paperclip was updated) or the sentinel is missing.
-CLAUDE_LOCAL_ADAPTER_ROOT=""
+# Copy skills from the claude-local adapter so orager gets the same Paperclip
+# procedural knowledge without us having to re-teach it.
+# Skills are uniquely named, so we skip any that already exist in the destination.
+# To force a refresh of a skill, delete its directory and re-run install.sh.
+CLAUDE_LOCAL_SKILLS=""
 for candidate in \
-  "$ADAPTER_MODULES/adapter-claude-local" \
-  "$NODE_MODULES_ROOT/@paperclipai/adapter-claude-local" \
-  "$PAPERCLIP_ROOT/node_modules/@paperclipai/adapter-claude-local"; do
-  if [[ -d "$candidate/skills" ]]; then
-    CLAUDE_LOCAL_ADAPTER_ROOT="$candidate"
+  "$ADAPTER_MODULES/adapter-claude-local/skills" \
+  "$NODE_MODULES_ROOT/@paperclipai/adapter-claude-local/skills" \
+  "$PAPERCLIP_ROOT/node_modules/@paperclipai/adapter-claude-local/skills"; do
+  if [[ -d "$candidate" ]]; then
+    CLAUDE_LOCAL_SKILLS="$candidate"
     break
   fi
 done
 
-SENTINEL_FILE="$ORAGER_SKILLS_DEST/.claude-local-version"
-
-if [[ -n "$CLAUDE_LOCAL_ADAPTER_ROOT" ]]; then
-  CLAUDE_LOCAL_SKILLS="$CLAUDE_LOCAL_ADAPTER_ROOT/skills"
-
-  # Read the installed adapter-claude-local version from its package.json
-  CLAUDE_LOCAL_VERSION="$(node -e "
-    try {
-      const p = require('$CLAUDE_LOCAL_ADAPTER_ROOT/package.json');
-      process.stdout.write(p.version || 'unknown');
-    } catch(e) { process.stdout.write('unknown'); }
-  " 2>/dev/null || echo "unknown")"
-
-  # Read the previously-copied version from the sentinel file
-  SENTINEL_VERSION="$(cat "$SENTINEL_FILE" 2>/dev/null || echo "")"
-
-  if [[ "$CLAUDE_LOCAL_VERSION" == "$SENTINEL_VERSION" ]]; then
-    echo "→ claude-local skills already up to date (v$CLAUDE_LOCAL_VERSION) — skipping"
-  else
-    echo "→ Copying claude-local skills (v$SENTINEL_VERSION → v$CLAUDE_LOCAL_VERSION) from $CLAUDE_LOCAL_SKILLS ..."
-    for skill_dir in "$CLAUDE_LOCAL_SKILLS"/*/; do
-      skill_name=$(basename "$skill_dir")
-      dest_skill="$ORAGER_SKILLS_DEST/$skill_name"
-      # Don't overwrite our own exec-based skills (they have an exec: line in SKILL.md)
-      if [[ -f "$dest_skill/SKILL.md" ]] && grep -q "^exec:" "$dest_skill/SKILL.md" 2>/dev/null; then
-        echo "  ✓ $skill_name (kept orager exec version)"
-        continue
-      fi
-      rm -rf "$dest_skill"
-      mkdir -p "$dest_skill"
-      cp -r "${skill_dir}." "$dest_skill/" 2>/dev/null || cp -r "$skill_dir"* "$dest_skill/" 2>/dev/null || true
-      echo "  ✓ $skill_name"
-    done
-    echo "$CLAUDE_LOCAL_VERSION" > "$SENTINEL_FILE"
-    echo "→ claude-local skills copied and sentinel written (v$CLAUDE_LOCAL_VERSION)"
-  fi
+if [[ -n "$CLAUDE_LOCAL_SKILLS" ]]; then
+  echo "→ Syncing claude-local skills from $CLAUDE_LOCAL_SKILLS ..."
+  for skill_dir in "$CLAUDE_LOCAL_SKILLS"/*/; do
+    skill_name=$(basename "$skill_dir")
+    dest_skill="$ORAGER_SKILLS_DEST/$skill_name"
+    if [[ -d "$dest_skill" ]]; then
+      echo "  ✓ $skill_name (already exists — skipping)"
+      continue
+    fi
+    mkdir -p "$dest_skill"
+    cp -r "${skill_dir}." "$dest_skill/" 2>/dev/null || cp -r "$skill_dir"* "$dest_skill/" 2>/dev/null || true
+    echo "  ✓ $skill_name (copied)"
+  done
 else
   echo "  ⚠ claude-local adapter not found — skipping (orager exec skills still installed)"
 fi
