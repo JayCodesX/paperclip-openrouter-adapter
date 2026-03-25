@@ -162,6 +162,15 @@ export function OpenRouterConfigFields({
             : mark("adapterConfig", "dangerouslySkipPermissions", v)
         }
       />
+
+      {!isCreate && (
+        <ToggleField
+          label="Reset session on next run"
+          hint="Trashes the current orager session so the next heartbeat starts with a fresh context. The old session is preserved on disk and can be reviewed or deleted via the orager CLI. Turn this off again after the next run."
+          checked={eff("adapterConfig", "resetSession", config.resetSession === true)}
+          onChange={(v) => mark("adapterConfig", "resetSession", v)}
+        />
+      )}
     </>
   );
 }

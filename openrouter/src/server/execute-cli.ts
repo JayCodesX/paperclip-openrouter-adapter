@@ -379,10 +379,25 @@ export async function executeAgentLoop(
 
   // ── Session ────────────────────────────────────────────────────────────────
   const runtimeSessionParams = parseObject(runtime.sessionParams);
-  const previousSessionId = asString(
-    runtimeSessionParams.oragerSessionId,
-    "",
-  );
+  const storedSessionId = asString(runtimeSessionParams.oragerSessionId, "");
+
+  // resetSession: trash the current session and start fresh.
+  // The orager binary trashes it so it's preserved on disk for review but
+  // won't be resumed. The adapter clears sessionParams so Paperclip forgets it.
+  const resetSession = config.resetSession === true;
+  if (resetSession && storedSessionId) {
+    try {
+      const cliPath = asString(config.cliPath, "orager").trim() || "orager";
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      await promisify(execFile)(cliPath, ["--trash-session", storedSessionId]);
+      await onLog("stderr", `[orager] session ${storedSessionId} trashed\n`);
+    } catch (err) {
+      await onLog("stderr", `[orager] warning: could not trash session: ${String(err)}\n`);
+    }
+  }
+
+  const previousSessionId = resetSession ? "" : storedSessionId;
 
   // Only prepend bootstrap + handoff on the first run
   // (instructions go to --system-prompt-file, not the user message)
