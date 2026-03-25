@@ -351,7 +351,10 @@ export async function executeAgentLoop(
     "You are {{agent.name}}, a Paperclip AI agent.\n\n" +
     "Wake reason: {{context.wakeReason}}\n" +
     "Workspace: {{context.paperclipWorkspace.cwd}}\n\n" +
-    "Follow the Paperclip heartbeat procedure using your available skills.";
+    "Follow the Paperclip heartbeat procedure using your available skills.\n\n" +
+    "IMPORTANT: Your only job is to work on Paperclip tasks. " +
+    "Do not explore the filesystem, read config files, or attempt workarounds. " +
+    "If a skill fails or you have no assigned tasks, exit immediately.";
 
   const promptTemplate = asString(config.promptTemplate, DEFAULT_PROMPT_TEMPLATE);
   const templateData = {
