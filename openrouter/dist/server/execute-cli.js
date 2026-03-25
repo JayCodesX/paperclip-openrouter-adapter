@@ -235,8 +235,33 @@ export async function executeAgentLoop(ctx) {
     catch {
         // Non-fatal — spawn will fail with a clearer error if cwd is truly invalid
     }
+    // ── Instructions file ──────────────────────────────────────────────────────
+    // Mirror claude-local's instructionsFilePath support: read the agent's
+    // Instructions tab content and prepend it to the bootstrap on the first run.
+    const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
+    let instructionsContent = "";
+    if (instructionsFilePath) {
+        try {
+            instructionsContent = await fs.readFile(instructionsFilePath, "utf-8");
+        }
+        catch (err) {
+            const reason = err instanceof Error ? err.message : String(err);
+            await onLog("stderr", `[paperclip] Warning: could not read agent instructions file "${instructionsFilePath}": ${reason}\n`);
+        }
+    }
     // ── Prompt ─────────────────────────────────────────────────────────────────
-    const promptTemplate = asString(config.promptTemplate, "You are agent {{agent.id}} ({{agent.name}}). Continue your Paperclip work.");
+    const DEFAULT_PROMPT_TEMPLATE = "You are agent {{agent.id}} ({{agent.name}}). " +
+        "You are running as a Paperclip AI agent.\n\n" +
+        "Current task ID: {{context.taskId}}\n" +
+        "Wake reason: {{context.wakeReason}}\n" +
+        "Workspace: {{context.paperclipWorkspace.cwd}}\n\n" +
+        "Use the tools available to you (bash, file system, etc.) to fetch the " +
+        "task details via the Paperclip API and complete the task. " +
+        "The task details can be fetched with:\n" +
+        "  curl -s \"$PAPERCLIP_API_URL/v1/tasks/$PAPERCLIP_TASK_ID\" \\\n" +
+        "    -H \"Authorization: Bearer $PAPERCLIP_API_KEY\"\n\n" +
+        "Proceed with your work.";
+    const promptTemplate = asString(config.promptTemplate, DEFAULT_PROMPT_TEMPLATE);
     const templateData = {
         agentId: agent.id,
         companyId: agent.companyId,
@@ -254,9 +279,10 @@ export async function executeAgentLoop(ctx) {
     // ── Session ────────────────────────────────────────────────────────────────
     const runtimeSessionParams = parseObject(runtime.sessionParams);
     const previousSessionId = asString(runtimeSessionParams.oragerSessionId, "");
-    // Only prepend bootstrap / handoff on the first run (no prior session)
+    // Only prepend instructions + bootstrap + handoff on the first run
     const isFirstRun = !previousSessionId;
     const prompt = joinPromptSections([
+        isFirstRun && instructionsContent ? instructionsContent : null,
         isFirstRun ? renderedBootstrap : null,
         isFirstRun ? sessionHandoff : null,
         userMessage,
@@ -443,6 +469,9 @@ export async function executeAgentLoop(ctx) {
                 `model: ${model}`,
                 `maxTurns: ${maxTurns}`,
                 previousSessionId ? `resume: ${previousSessionId}` : "new session",
+                ...(instructionsFilePath
+                    ? [`instructions: ${instructionsFilePath}`]
+                    : []),
             ],
             env: redactEnvForLogs(env),
             prompt,
