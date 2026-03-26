@@ -47,6 +47,55 @@ async function isDaemonAlive(baseUrl: string): Promise<boolean> {
   }
 }
 
+/**
+ * Attempt to auto-start the orager daemon if ORAGER_DAEMON_AUTOSTART=true
+ * is set in the environment. Spawns orager --serve detached and polls
+ * /health until it responds (up to 5s). Non-fatal — falls through to spawn
+ * if start fails.
+ */
+async function tryAutoStartDaemon(
+  daemonUrl: string,
+  cliPath: string,
+  apiKey: string,
+  env: Record<string, string>,
+  onLog: (stream: "stdout" | "stderr", line: string) => Promise<void> | void,
+): Promise<boolean> {
+  if (process.env.ORAGER_DAEMON_AUTOSTART !== "true") return false;
+
+  // Extract port from URL
+  let port = 3456;
+  try {
+    port = parseInt(new URL(daemonUrl).port, 10) || 3456;
+  } catch { /* use default */ }
+
+  try {
+    await ensureCommandResolvable(cliPath, process.cwd(), env);
+  } catch {
+    return false; // Can't find binary — skip
+  }
+
+  void onLog("stderr", `[openrouter adapter] auto-starting orager daemon on port ${port}...\n`);
+
+  const child = spawn(cliPath, ["--serve", "--port", String(port)], {
+    detached: true,
+    stdio: "ignore",
+    env: { ...env, OPENROUTER_API_KEY: apiKey, ORAGER_API_KEY: apiKey },
+  });
+  child.unref();
+
+  // Poll /health until daemon responds (up to 5s)
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    await new Promise<void>((r) => setTimeout(r, 300));
+    if (await isDaemonAlive(daemonUrl)) {
+      void onLog("stderr", `[openrouter adapter] daemon started on port ${port}\n`);
+      return true;
+    }
+  }
+  void onLog("stderr", `[openrouter adapter] daemon did not start in time — falling back to spawn\n`);
+  return false;
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 // skills/ dir is at the root of the adapter package (two levels up from dist/server/)
@@ -149,6 +198,20 @@ function ensurePathInEnv(env: Record<string, string>): Record<string, string> {
 }
 
 /**
+ * Check that all required environment variable names are present and non-empty.
+ * Returns an array of missing variable names.
+ */
+function checkRequiredEnvVars(
+  required: unknown,
+  env: Record<string, string>,
+): string[] {
+  if (!Array.isArray(required)) return [];
+  return required.filter(
+    (v): v is string => typeof v === "string" && v.trim().length > 0 && !env[v.trim()],
+  );
+}
+
+/**
  * Execute an agent run by POSTing to the orager daemon.
  * Returns the same AdapterExecutionResult shape as the spawn path.
  */
@@ -160,6 +223,7 @@ async function executeViaDaemon(
   daemonOpts: Record<string, unknown>,
   timeoutSec: number,
   onLog: (stream: "stdout" | "stderr", line: string) => Promise<void> | void,
+  maxCostUsdSoft?: number,
 ): Promise<AdapterExecutionResult | null> {
   const token = mintDaemonJwt(signingKey, agentId);
   let response: Response;
@@ -291,6 +355,18 @@ async function executeViaDaemon(
 
   if (!sessionId && typeof resultEvent.session_id === "string") sessionId = resultEvent.session_id;
 
+  if (maxCostUsdSoft !== undefined && totalCostUsd >= maxCostUsdSoft) {
+    void onLog(
+      "stderr",
+      `[openrouter adapter] soft cost limit reached ($${totalCostUsd.toFixed(4)} >= $${maxCostUsdSoft}) — consider adjusting maxCostUsd\n`,
+    );
+  }
+
+  const cacheHitRatio =
+    typeof usageRaw?.input_tokens === "number" && usageRaw.input_tokens > 0
+      ? (typeof usageRaw.cache_read_input_tokens === "number" ? usageRaw.cache_read_input_tokens : 0) / usageRaw.input_tokens
+      : 0;
+
   const isSuccess = subtype === "success";
   const isMaxTurns = subtype === "error_max_turns";
   const softStop = isSuccess || isMaxTurns;
@@ -321,7 +397,14 @@ async function executeViaDaemon(
     sessionParams: newSessionParams,
     sessionDisplayId: sessionId || null,
     summary: resultText,
-    resultJson: { result: resultText, subtype, sessionId, totalCostUsd },
+    resultJson: {
+      result: resultText,
+      subtype,
+      sessionId,
+      totalCostUsd,
+      cacheHitRatio: Math.round(cacheHitRatio * 100) / 100,
+      turnCount: typeof resultEvent.turnCount === "number" ? resultEvent.turnCount : undefined,
+    },
   };
 }
 
@@ -329,8 +412,23 @@ const DEFAULT_CLI = "orager";
 const DEFAULT_MODEL = "deepseek/deepseek-chat-v3-0324";
 const DEFAULT_MAX_TURNS = 20;
 const DEFAULT_MAX_RETRIES = 3;
-const DEFAULT_TIMEOUT_SEC = 300; // 5 min — agent loops take longer than single completions
+const DEFAULT_TIMEOUT_SEC = 300; // 5 min — fallback used inside defaultTimeoutForModel
 const DEFAULT_GRACE_SEC = 20;
+
+/**
+ * Pick a sensible default timeout for the given model.
+ * Reasoning/thinking models need more time; fast chat models need less.
+ * All values are in seconds.
+ */
+function defaultTimeoutForModel(model: string): number {
+  const lower = model.toLowerCase();
+  // Extended thinking / reasoning models — can think for minutes
+  if (/\br1\b|deepseek-r1|\/o1|\/o3|thinking|reasoning/.test(lower)) return 600;
+  // Fast chat / flash models
+  if (/haiku|flash|mini|turbo/.test(lower)) return 120;
+  // Default
+  return DEFAULT_TIMEOUT_SEC;
+}
 
 /**
  * Execute an autonomous agent loop by spawning the `orager` CLI as a
@@ -350,13 +448,26 @@ export async function executeAgentLoop(
   // Support both cliPath and the generic "command" field from the Paperclip UI
   const cliPath = asString(config.cliPath ?? config.command, DEFAULT_CLI);
   const model = asString(config.model, DEFAULT_MODEL);
+
+  // Wake-reason-based model routing — allows routing smarter/faster models
+  // based on why the agent was triggered, without changing the base config.
+  const wakeReasonModels = parseObject(config.wakeReasonModels);
+  const wakeReason =
+    typeof context.wakeReason === "string" && context.wakeReason.trim()
+      ? context.wakeReason.trim()
+      : "";
+  const effectiveModel =
+    (wakeReason && typeof wakeReasonModels[wakeReason] === "string"
+      ? (wakeReasonModels[wakeReason] as string)
+      : null) ?? model;
+
   // Support both maxTurns and maxTurnsPerRun (alias for compatibility)
   const maxTurns = asNumber(
     config.maxTurnsPerRun ?? config.maxTurns,
     DEFAULT_MAX_TURNS,
   );
   const maxRetries = asNumber(config.maxRetries, DEFAULT_MAX_RETRIES);
-  const timeoutSec = asNumber(config.timeoutSec, DEFAULT_TIMEOUT_SEC);
+  const timeoutSec = asNumber(config.timeoutSec, defaultTimeoutForModel(effectiveModel));
   const graceSec = asNumber(config.graceSec, DEFAULT_GRACE_SEC);
   const dangerouslySkipPermissions = asBoolean(
     config.dangerouslySkipPermissions,
@@ -478,6 +589,8 @@ export async function executeAgentLoop(
   // Cost limits
   const maxCostUsd =
     typeof config.maxCostUsd === "number" ? config.maxCostUsd : undefined;
+  const maxCostUsdSoft =
+    typeof config.maxCostUsdSoft === "number" ? config.maxCostUsdSoft : undefined;
   const costPerInputToken =
     typeof config.costPerInputToken === "number"
       ? config.costPerInputToken
@@ -490,6 +603,24 @@ export async function executeAgentLoop(
   // Approval
   const requireApproval = asBoolean(config.requireApproval, false);
   const requireApprovalFor = asString(config.requireApprovalFor, "");
+
+  // Dry-run mode
+  const dryRun = asBoolean(config.dryRun, false);
+
+  // Required env vars
+  const requiredEnvVars = Array.isArray(config.requiredEnvVars)
+    ? config.requiredEnvVars.filter((v: unknown) => typeof v === "string")
+    : [];
+
+  // Summarize config
+  const summarizeAt =
+    typeof config.summarizeAt === "number" && config.summarizeAt > 0 && config.summarizeAt <= 1
+      ? config.summarizeAt
+      : undefined;
+  const summarizeModel =
+    typeof config.summarizeModel === "string" && config.summarizeModel.trim()
+      ? config.summarizeModel.trim()
+      : undefined;
 
   // Extra tool spec files
   const toolsFiles = Array.isArray(config.toolsFiles)
@@ -640,7 +771,7 @@ export async function executeAgentLoop(
   // Orager reads and immediately deletes the file before doing anything else.
   const configObj: Record<string, unknown> = {
     outputFormat: "stream-json",
-    model,
+    model: effectiveModel,
     maxTurns: maxTurns > 0 ? maxTurns : undefined,
     maxRetries,
     addDirs,
@@ -702,6 +833,10 @@ export async function executeAgentLoop(
 
   // Extra tools
   if (toolsFiles.length > 0) configObj.toolsFiles = toolsFiles;
+
+  // Summarize config
+  if (summarizeAt !== undefined) configObj.summarizeAt = summarizeAt;
+  if (summarizeModel) configObj.summarizeModel = summarizeModel;
 
   // Write config to a crypto-random temp file, chmod 600 before writing content
   const configFileName = `orager-config-${crypto.randomBytes(16).toString("hex")}.json`;
@@ -810,6 +945,32 @@ export async function executeAgentLoop(
   // Merge with process.env and ensure PATH is populated
   const effectiveEnv = ensurePathInEnv({ ...(process.env as Record<string, string>), ...env });
 
+  // ── Per-agent environment validation ────────────────────────────────────────
+  const missingVars = checkRequiredEnvVars(requiredEnvVars, effectiveEnv);
+  if (missingVars.length > 0) {
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: `Missing required environment variables: ${missingVars.join(", ")}`,
+      errorCode: "spawn_error",
+    };
+  }
+
+  // ── Dry-run mode ────────────────────────────────────────────────────────────
+  if (dryRun) {
+    void onLog("stderr", "[openrouter adapter] DRY RUN — no API calls will be made\n");
+    void onLog("stderr", `[openrouter adapter] model: ${effectiveModel}, session: ${previousSessionId || "new"}, cwd: ${cwd}\n`);
+    void onLog("stderr", `[openrouter adapter] prompt (${prompt.length} chars): ${prompt.slice(0, 200)}${prompt.length > 200 ? "..." : ""}\n`);
+    return {
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      summary: "[dry-run] no agent run executed",
+      resultJson: { result: "[dry-run]", subtype: "success", sessionId: "", totalCostUsd: 0 },
+    };
+  }
+
   // ── Daemon fast-path ────────────────────────────────────────────────────────
   // If ORAGER_DAEMON_URL (or config.daemonUrl) is set, attempt to route this
   // run through the persistent orager daemon instead of spawning a subprocess.
@@ -820,13 +981,21 @@ export async function executeAgentLoop(
     asString(config.daemonUrl, "") || process.env.ORAGER_DAEMON_URL || "";
 
   if (daemonBaseUrl) {
-    const signingKey = await readDaemonSigningKey();
-    const alive = signingKey ? await isDaemonAlive(daemonBaseUrl) : false;
+    let signingKey = await readDaemonSigningKey();
+    let alive = signingKey ? await isDaemonAlive(daemonBaseUrl) : false;
+
+    if (!alive) {
+      alive = await tryAutoStartDaemon(daemonBaseUrl, cliPath, apiKey, effectiveEnv, onLog);
+      if (alive) {
+        // Re-read signing key in case it was just generated
+        signingKey = await readDaemonSigningKey();
+      }
+    }
 
     if (alive && signingKey) {
       // Build opts for daemon (AgentLoopOptions without apiKey/onEmit/onLog)
       const daemonOpts: Record<string, unknown> = {
-        model,
+        model: effectiveModel,
         models: models.length > 0 ? models : undefined,
         sessionId: previousSessionId || null,
         addDirs,
@@ -887,6 +1056,7 @@ export async function executeAgentLoop(
         daemonOpts,
         timeoutSec,
         onLog,
+        maxCostUsdSoft,
       );
       if (daemonResult !== null) {
         return daemonResult;
@@ -906,7 +1076,7 @@ export async function executeAgentLoop(
       cwd,
       commandArgs: args,
       commandNotes: [
-        `model: ${model}`,
+        `model: ${effectiveModel}`,
         `maxTurns: ${maxTurns}`,
         previousSessionId ? `resume: ${previousSessionId}` : "new session",
         ...(instructionsFilePath
@@ -1090,6 +1260,18 @@ export async function executeAgentLoop(
         sessionId = resultEvent.session_id;
       }
 
+      if (maxCostUsdSoft !== undefined && totalCostUsd >= maxCostUsdSoft) {
+        void onLog(
+          "stderr",
+          `[openrouter adapter] soft cost limit reached ($${totalCostUsd.toFixed(4)} >= $${maxCostUsdSoft}) — consider adjusting maxCostUsd\n`,
+        );
+      }
+
+      const cacheHitRatio =
+        typeof usageRaw?.input_tokens === "number" && usageRaw.input_tokens > 0
+          ? (typeof usageRaw.cache_read_input_tokens === "number" ? usageRaw.cache_read_input_tokens : 0) / usageRaw.input_tokens
+          : 0;
+
       const isSuccess = subtype === "success";
       const isMaxTurns = subtype === "error_max_turns";
       // error_max_turns is a soft stop — the run completed
@@ -1148,6 +1330,8 @@ export async function executeAgentLoop(
           subtype,
           sessionId,
           totalCostUsd,
+          cacheHitRatio: Math.round(cacheHitRatio * 100) / 100,
+          turnCount: typeof resultEvent?.turnCount === "number" ? resultEvent.turnCount : undefined,
         },
       });
     });
