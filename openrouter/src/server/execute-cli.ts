@@ -6,6 +6,47 @@ import { fileURLToPath } from "node:url";
 import os from "node:os";
 import crypto from "node:crypto";
 
+// ── Daemon client ─────────────────────────────────────────────────────────────
+// If ORAGER_DAEMON_URL is set (or config.daemonUrl is set), the adapter sends
+// requests to the persistent orager daemon instead of spawning a new process.
+// The daemon eliminates Node.js startup overhead and keeps all caches warm.
+
+const DAEMON_KEY_PATH = path.join(os.homedir(), ".orager", "daemon.key");
+
+async function readDaemonSigningKey(): Promise<string | null> {
+  try {
+    const key = await fs.readFile(DAEMON_KEY_PATH, "utf8");
+    return key.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Mint a short-lived HS256 JWT for authenticating to the orager daemon.
+ * Mirrors the implementation in orager/src/jwt.ts — must stay in sync.
+ */
+function mintDaemonJwt(signingKey: string, agentId: string): string {
+  const now = Math.floor(Date.now() / 1000);
+  const b64url = (s: string) => Buffer.from(s, "utf8").toString("base64url");
+  const header = b64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const payload = b64url(JSON.stringify({ agentId, scope: "run", iat: now, exp: now + 300 }));
+  const data = `${header}.${payload}`;
+  const sig = crypto.createHmac("sha256", signingKey).update(data).digest("base64url");
+  return `${data}.${sig}`;
+}
+
+async function isDaemonAlive(baseUrl: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(2000) });
+    if (!res.ok) return false;
+    const body = await res.json() as { status?: string };
+    return body.status === "ok";
+  } catch {
+    return false;
+  }
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 // skills/ dir is at the root of the adapter package (two levels up from dist/server/)
@@ -105,6 +146,162 @@ function ensurePathInEnv(env: Record<string, string>): Record<string, string> {
   if (env.PATH) return env;
   // Fallback: inherit PATH from process.env
   return { ...env, PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin" };
+}
+
+/**
+ * Execute an agent run by POSTing to the orager daemon.
+ * Returns the same AdapterExecutionResult shape as the spawn path.
+ */
+async function executeViaDaemon(
+  baseUrl: string,
+  signingKey: string,
+  agentId: string,
+  prompt: string,
+  daemonOpts: Record<string, unknown>,
+  timeoutSec: number,
+  onLog: (stream: "stdout" | "stderr", line: string) => Promise<void> | void,
+): Promise<import("@paperclipai/adapter-utils").AdapterExecutionResult> {
+  const token = mintDaemonJwt(signingKey, agentId);
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/run`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ prompt, opts: daemonOpts }),
+      signal: AbortSignal.timeout((timeoutSec + 10) * 1000),
+    });
+  } catch (err) {
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: `Daemon request failed: ${err instanceof Error ? err.message : String(err)}`,
+      errorCode: "spawn_error",
+    };
+  }
+
+  if (response.status === 503) {
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: "Daemon is at max concurrent runs — retry shortly",
+      errorCode: "spawn_error",
+    };
+  }
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: `Daemon error ${response.status}: ${text.slice(0, 200)}`,
+      errorCode: "spawn_error",
+    };
+  }
+
+  if (!response.body) {
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: "Daemon response has no body",
+      errorCode: "spawn_error",
+    };
+  }
+
+  // Stream NDJSON from daemon — same parsing logic as the spawn stdout path
+  let resultEvent: Record<string, unknown> | null = null;
+  let sessionId = "";
+  let resolvedModel = "";
+  let sessionLost = false;
+  let buffer = "";
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      void onLog("stdout", line + "\n");
+      try {
+        const event = JSON.parse(line) as Record<string, unknown>;
+        if (event.type === "system" && typeof event.session_id === "string") {
+          sessionId = event.session_id;
+          if (typeof event.model === "string") resolvedModel = event.model;
+        }
+        if (event.type === "result") resultEvent = event;
+      } catch {
+        // non-JSON lines ok
+      }
+    }
+  }
+  // flush
+  if (buffer.trim()) {
+    try {
+      const event = JSON.parse(buffer) as Record<string, unknown>;
+      if (event.type === "result") resultEvent = event;
+    } catch { /* ok */ }
+  }
+
+  if (!resultEvent) {
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: "Daemon run ended without a result event",
+    };
+  }
+
+  const subtype = typeof resultEvent.subtype === "string" ? resultEvent.subtype : "error";
+  const resultText = typeof resultEvent.result === "string" ? resultEvent.result : "";
+  const usageRaw = typeof resultEvent.usage === "object" && resultEvent.usage !== null
+    ? (resultEvent.usage as Record<string, unknown>) : null;
+  const totalCostUsd = typeof resultEvent.total_cost_usd === "number" ? resultEvent.total_cost_usd : 0;
+
+  if (!sessionId && typeof resultEvent.session_id === "string") sessionId = resultEvent.session_id;
+
+  const isSuccess = subtype === "success";
+  const isMaxTurns = subtype === "error_max_turns";
+  const softStop = isSuccess || isMaxTurns;
+  const clearSession = isMaxTurns || sessionLost;
+
+  const newSessionParams = sessionId
+    ? { oragerSessionId: sessionId, updatedAt: new Date().toISOString() }
+    : null;
+
+  return {
+    exitCode: softStop ? 0 : 1,
+    signal: null,
+    timedOut: false,
+    errorMessage: softStop ? undefined : `Agent loop ended: ${subtype}${resultText ? ` — ${resultText}` : ""}`,
+    clearSession,
+    model: resolvedModel || undefined,
+    usage: usageRaw
+      ? {
+          inputTokens: typeof usageRaw.input_tokens === "number" ? usageRaw.input_tokens : 0,
+          outputTokens: typeof usageRaw.output_tokens === "number" ? usageRaw.output_tokens : 0,
+          cachedInputTokens: typeof usageRaw.cache_read_input_tokens === "number" ? usageRaw.cache_read_input_tokens : 0,
+        }
+      : undefined,
+    provider: "openrouter",
+    biller: "openrouter",
+    billingType: "api",
+    costUsd: totalCostUsd,
+    sessionParams: newSessionParams,
+    sessionDisplayId: sessionId || null,
+    summary: resultText,
+    resultJson: { result: resultText, subtype, sessionId, totalCostUsd },
+  };
 }
 
 const DEFAULT_CLI = "orager";
@@ -591,6 +788,90 @@ export async function executeAgentLoop(
 
   // Merge with process.env and ensure PATH is populated
   const effectiveEnv = ensurePathInEnv({ ...(process.env as Record<string, string>), ...env });
+
+  // ── Daemon fast-path ────────────────────────────────────────────────────────
+  // If ORAGER_DAEMON_URL (or config.daemonUrl) is set, attempt to route this
+  // run through the persistent orager daemon instead of spawning a subprocess.
+  // The daemon eliminates Node.js startup overhead (~50-200ms) and keeps all
+  // in-process caches warm (skills, tool results, LLM prompt cache via sticky routing).
+  // Falls back to the spawn path if the daemon is unreachable.
+  const daemonBaseUrl =
+    asString(config.daemonUrl, "") || process.env.ORAGER_DAEMON_URL || "";
+
+  if (daemonBaseUrl) {
+    const signingKey = await readDaemonSigningKey();
+    const alive = signingKey ? await isDaemonAlive(daemonBaseUrl) : false;
+
+    if (alive && signingKey) {
+      // Build opts for daemon (AgentLoopOptions without apiKey/onEmit/onLog)
+      const daemonOpts: Record<string, unknown> = {
+        model,
+        models: models.length > 0 ? models : undefined,
+        sessionId: previousSessionId || null,
+        addDirs,
+        maxTurns: maxTurns > 0 ? maxTurns : 0,
+        maxRetries,
+        cwd,
+        dangerouslySkipPermissions,
+        verbose: false,
+        useFinishTool,
+        siteUrl: siteUrl || undefined,
+        siteName: siteName || undefined,
+        sandboxRoot: sandboxRoot || undefined,
+        parallel_tool_calls: parallelToolCalls,
+        tool_choice: toolChoice || undefined,
+        temperature,
+        top_p,
+        top_k,
+        frequency_penalty,
+        presence_penalty,
+        repetition_penalty,
+        min_p,
+        seed,
+        stop: stopTokens.length > 0 ? stopTokens : undefined,
+        reasoning: (reasoningEffort || reasoningMaxTokens || reasoningExclude)
+          ? {
+              ...(reasoningEffort ? { effort: reasoningEffort } : {}),
+              ...(reasoningMaxTokens ? { max_tokens: reasoningMaxTokens } : {}),
+              ...(reasoningExclude ? { exclude: true } : {}),
+            }
+          : undefined,
+        provider: (providerOrder || providerIgnore || providerOnly || dataCollection || zdr || sort || quantizations || requireParameters)
+          ? {
+              ...(providerOrder ? { order: providerOrder.split(",").filter(Boolean) } : {}),
+              ...(providerIgnore ? { ignore: providerIgnore.split(",").filter(Boolean) } : {}),
+              ...(providerOnly ? { only: providerOnly.split(",").filter(Boolean) } : {}),
+              ...(dataCollection ? { data_collection: dataCollection } : {}),
+              ...(zdr ? { zdr: true } : {}),
+              ...(sort ? { sort } : {}),
+              ...(quantizations ? { quantizations: quantizations.split(",").filter(Boolean) } : {}),
+              ...(requireParameters ? { require_parameters: true } : {}),
+            }
+          : undefined,
+        preset: preset || undefined,
+        transforms: transforms ? transforms.split(",").filter(Boolean) : undefined,
+        maxCostUsd,
+        costPerInputToken,
+        costPerOutputToken,
+        appendSystemPrompt: instructionsFilePath
+          ? await fs.readFile(instructionsFilePath, "utf8").catch(() => undefined)
+          : undefined,
+      };
+
+      return await executeViaDaemon(
+        daemonBaseUrl,
+        signingKey,
+        agent.id,
+        prompt,
+        daemonOpts,
+        timeoutSec,
+        onLog,
+      );
+    } else {
+      // Daemon URL set but unreachable — log a warning and fall through to spawn
+      void onLog("stderr", `[openrouter adapter] daemon at ${daemonBaseUrl} unreachable — falling back to spawn\n`);
+    }
+  }
 
   // ── onMeta ─────────────────────────────────────────────────────────────────
   if (onMeta) {
