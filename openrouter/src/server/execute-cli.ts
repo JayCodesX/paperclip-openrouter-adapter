@@ -160,7 +160,7 @@ async function executeViaDaemon(
   daemonOpts: Record<string, unknown>,
   timeoutSec: number,
   onLog: (stream: "stdout" | "stderr", line: string) => Promise<void> | void,
-): Promise<import("@paperclipai/adapter-utils").AdapterExecutionResult> {
+): Promise<AdapterExecutionResult | null> {
   const token = mintDaemonJwt(signingKey, agentId);
   let response: Response;
   try {
@@ -184,13 +184,34 @@ async function executeViaDaemon(
   }
 
   if (response.status === 503) {
-    return {
-      exitCode: 1,
-      signal: null,
-      timedOut: false,
-      errorMessage: "Daemon is at max concurrent runs — retry shortly",
-      errorCode: "spawn_error",
-    };
+    // Respect Retry-After header (max 30s wait) then retry the daemon once.
+    // If still saturated after the retry, return null to trigger spawn fallback (#1).
+    const retryAfterSec = Math.min(
+      parseInt(response.headers.get("Retry-After") ?? "5", 10),
+      30,
+    );
+    void onLog("stderr", `[openrouter adapter] daemon at capacity — retrying in ${retryAfterSec}s\n`);
+    await new Promise<void>((r) => setTimeout(r, retryAfterSec * 1000));
+    // Retry with a fresh token (original may expire if wait was long)
+    const retryToken = mintDaemonJwt(signingKey, agentId);
+    try {
+      response = await fetch(`${baseUrl}/run`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${retryToken}`,
+        },
+        body: JSON.stringify({ prompt, opts: daemonOpts }),
+        signal: AbortSignal.timeout((timeoutSec + 10) * 1000),
+      });
+    } catch {
+      // Retry network failure — fall back to spawn
+      return null;
+    }
+    if (response.status === 503) {
+      // Still at capacity after retry — fall back to spawn
+      return null;
+    }
   }
 
   if (!response.ok) {
@@ -858,7 +879,7 @@ export async function executeAgentLoop(
           : undefined,
       };
 
-      return await executeViaDaemon(
+      const daemonResult = await executeViaDaemon(
         daemonBaseUrl,
         signingKey,
         agent.id,
@@ -867,8 +888,12 @@ export async function executeAgentLoop(
         timeoutSec,
         onLog,
       );
+      if (daemonResult !== null) {
+        return daemonResult;
+      }
+      // null = daemon at capacity after retry — fall through to spawn
+      void onLog("stderr", `[openrouter adapter] daemon at capacity after retry — falling back to spawn\n`);
     } else {
-      // Daemon URL set but unreachable — log a warning and fall through to spawn
       void onLog("stderr", `[openrouter adapter] daemon at ${daemonBaseUrl} unreachable — falling back to spawn\n`);
     }
   }
