@@ -3,6 +3,8 @@ import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import os from "node:os";
+import crypto from "node:crypto";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -412,84 +414,111 @@ export async function executeAgentLoop(
     userMessage,
   ]);
 
-  // ── Build CLI args ─────────────────────────────────────────────────────────
+  // ── Build config object and write to temp file ────────────────────────────
+  // Instead of building 50+ CLI args, we write all config to a temp JSON file
+  // and pass --config-file <path> as the only config arg. This avoids argument
+  // length limits on some systems and keeps the subprocess invocation clean.
+  // The file is chmod 600 before writing so only the current user can read it.
+  // Orager reads and immediately deletes the file before doing anything else.
+  const configObj: Record<string, unknown> = {
+    outputFormat: "stream-json",
+    model,
+    maxTurns: maxTurns > 0 ? maxTurns : undefined,
+    maxRetries,
+    addDirs,
+  };
+
+  if (previousSessionId) configObj.sessionId = previousSessionId;
+  if (instructionsFilePath) configObj.systemPromptFile = instructionsFilePath;
+  if (dangerouslySkipPermissions) configObj.dangerouslySkipPermissions = true;
+  if (sandboxRoot) configObj.sandboxRoot = sandboxRoot;
+  if (useFinishTool) configObj.useFinishTool = true;
+  if (siteUrl) configObj.siteUrl = siteUrl;
+  if (siteName) configObj.siteName = siteName;
+
+  // Sampling
+  if (temperature !== undefined) configObj.temperature = temperature;
+  if (top_p !== undefined) configObj.top_p = top_p;
+  if (top_k !== undefined) configObj.top_k = top_k;
+  if (frequency_penalty !== undefined) configObj.frequency_penalty = frequency_penalty;
+  if (presence_penalty !== undefined) configObj.presence_penalty = presence_penalty;
+  if (repetition_penalty !== undefined) configObj.repetition_penalty = repetition_penalty;
+  if (min_p !== undefined) configObj.min_p = min_p;
+  if (seed !== undefined) configObj.seed = seed;
+  if (stopTokens.length > 0) configObj.stop = stopTokens;
+
+  // Tool control
+  if (toolChoice) configObj.tool_choice = toolChoice;
+  configObj.parallel_tool_calls = parallelToolCalls;
+
+  // Reasoning
+  if (reasoningEffort) configObj.reasoningEffort = reasoningEffort;
+  if (reasoningMaxTokens !== undefined) configObj.reasoningMaxTokens = reasoningMaxTokens;
+  if (reasoningExclude) configObj.reasoningExclude = true;
+
+  // Provider routing — pass as comma-separated strings (matching CLI format)
+  if (providerOrder) configObj.providerOrder = providerOrder.split(",").filter(Boolean);
+  if (providerIgnore) configObj.providerIgnore = providerIgnore.split(",").filter(Boolean);
+  if (providerOnly) configObj.providerOnly = providerOnly.split(",").filter(Boolean);
+  if (dataCollection) configObj.dataCollection = dataCollection;
+  if (zdr) configObj.zdr = true;
+  if (sort) configObj.sort = sort;
+  if (requireParameters) configObj.require_parameters = true;
+  if (quantizations) configObj.quantizations = quantizations.split(",").filter(Boolean);
+  if (preset) configObj.preset = preset;
+
+  // Fallback models
+  if (models.length > 0) configObj.models = models;
+
+  // Transforms
+  if (transforms) configObj.transforms = transforms.split(",").filter(Boolean);
+
+  // Cost limits
+  if (maxCostUsd !== undefined) configObj.maxCostUsd = maxCostUsd;
+  if (costPerInputToken !== undefined) configObj.costPerInputToken = costPerInputToken;
+  if (costPerOutputToken !== undefined) configObj.costPerOutputToken = costPerOutputToken;
+
+  // Approval
+  if (requireApprovalFor) configObj.requireApprovalFor = requireApprovalFor;
+  else if (requireApproval) configObj.requireApproval = true;
+
+  // Extra tools
+  if (toolsFiles.length > 0) configObj.toolsFiles = toolsFiles;
+
+  // Write config to a crypto-random temp file, chmod 600 before writing content
+  const configFileName = `orager-config-${crypto.randomBytes(16).toString("hex")}.json`;
+  const configFilePath = path.join(os.tmpdir(), configFileName);
+  let configFileWritten = false;
+  try {
+    // Create the file with mode 600 (owner read/write only) before writing content
+    const fd = await fs.open(configFilePath, "w", 0o600);
+    await fd.write(JSON.stringify(configObj));
+    await fd.close();
+    configFileWritten = true;
+  } catch (err) {
+    // Config file write failed — fall back to individual CLI args is not
+    // implemented; surface the error so the caller sees it rather than silently
+    // proceeding with no config.
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: `Failed to write orager config file: ${err instanceof Error ? err.message : String(err)}`,
+      errorCode: "spawn_error",
+    };
+  }
+
+  // Build minimal CLI args — just the prompt source, output format, verbose flag,
+  // and the config file path. All model/provider/sampling config is in the file.
   const args: string[] = [
     "--print",
     "-",
-    "--output-format",
-    "stream-json",
     "--verbose",
+    "--config-file",
+    configFilePath,
   ];
-  args.push("--model", model);
-  if (maxTurns > 0) args.push("--max-turns", String(maxTurns));
-  args.push("--max-retries", String(maxRetries));
-  if (previousSessionId) args.push("--resume", previousSessionId);
-  if (instructionsFilePath) args.push("--system-prompt-file", instructionsFilePath);
-  if (dangerouslySkipPermissions) args.push("--dangerously-skip-permissions");
-  if (sandboxRoot) args.push("--sandbox-root", sandboxRoot);
-  if (useFinishTool) args.push("--use-finish-tool");
-  if (siteUrl) args.push("--site-url", siteUrl);
-  if (siteName) args.push("--site-name", siteName);
 
-  // Sampling
-  if (temperature !== undefined) args.push("--temperature", String(temperature));
-  if (top_p !== undefined) args.push("--top-p", String(top_p));
-  if (top_k !== undefined) args.push("--top-k", String(top_k));
-  if (frequency_penalty !== undefined)
-    args.push("--frequency-penalty", String(frequency_penalty));
-  if (presence_penalty !== undefined)
-    args.push("--presence-penalty", String(presence_penalty));
-  if (repetition_penalty !== undefined)
-    args.push("--repetition-penalty", String(repetition_penalty));
-  if (min_p !== undefined) args.push("--min-p", String(min_p));
-  if (seed !== undefined) args.push("--seed", String(seed));
-  for (const s of stopTokens) args.push("--stop", s);
-
-  // Tool control
-  if (toolChoice) args.push("--tool-choice", toolChoice);
-  if (parallelToolCalls === true) args.push("--parallel-tool-calls");
-  if (parallelToolCalls === false) args.push("--no-parallel-tool-calls");
-
-  // Reasoning
-  if (reasoningEffort) args.push("--reasoning-effort", reasoningEffort);
-  if (reasoningMaxTokens !== undefined)
-    args.push("--reasoning-max-tokens", String(reasoningMaxTokens));
-  if (reasoningExclude) args.push("--reasoning-exclude");
-
-  // Provider routing
-  if (providerOrder) args.push("--provider-order", providerOrder);
-  if (providerIgnore) args.push("--provider-ignore", providerIgnore);
-  if (providerOnly) args.push("--provider-only", providerOnly);
-  if (dataCollection) args.push("--data-collection", dataCollection);
-  if (zdr) args.push("--zdr");
-  if (sort) args.push("--sort", sort);
-  if (requireParameters) args.push("--require-parameters");
-  if (quantizations) args.push("--quantizations", quantizations);
-  if (preset) args.push("--preset", preset);
-
-  // Fallback models
-  for (const m of models) args.push("--model-fallback", m);
-
-  // Transforms
-  if (transforms) args.push("--transforms", transforms);
-
-  // Cost limits
-  if (maxCostUsd !== undefined)
-    args.push("--max-cost-usd", String(maxCostUsd));
-  if (costPerInputToken !== undefined)
-    args.push("--cost-per-input-token", String(costPerInputToken));
-  if (costPerOutputToken !== undefined)
-    args.push("--cost-per-output-token", String(costPerOutputToken));
-
-  // Approval
-  if (requireApprovalFor) args.push("--require-approval-for", requireApprovalFor);
-  else if (requireApproval) args.push("--require-approval");
-
-  // Extra tools / skills
-  for (const f of toolsFiles) args.push("--tools-file", f);
-  for (const d of addDirs) args.push("--add-dir", d);
-
-  // Extra passthrough args
+  // Extra passthrough args (not included in config file — caller-supplied raw flags)
   if (extraArgs.length > 0) args.push(...extraArgs);
 
   // ── Environment ────────────────────────────────────────────────────────────
@@ -594,6 +623,10 @@ export async function executeAgentLoop(
   try {
     await ensureCommandResolvable(cliPath, cwd, effectiveEnv);
   } catch (err) {
+    // Clean up the config file since we won't be spawning orager to delete it
+    if (configFileWritten) {
+      await fs.unlink(configFilePath).catch(() => {});
+    }
     return {
       exitCode: 1,
       signal: null,
@@ -613,6 +646,8 @@ export async function executeAgentLoop(
         stdio: ["pipe", "pipe", "pipe"],
       });
     } catch (spawnErr) {
+      // Clean up the config file on spawn failure — orager won't get to delete it
+      fs.unlink(configFilePath).catch(() => {});
       resolve({
         exitCode: 1,
         signal: null,
