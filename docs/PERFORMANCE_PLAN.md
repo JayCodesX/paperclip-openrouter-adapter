@@ -361,23 +361,23 @@ daemon logs: { timestamp, agentId, duration, status } — never prompt content
 
 ## Full Summary Table
 
-| # | Change | Repo | Phase | Effort | Speed | Cost | Reliability | Risk |
-|---|---|---|---|---|---|---|---|---|
-| 9 | OpenRouter Presets | adapter | 1 | XS | — | — | ⭐⭐⭐ | None |
-| 7 | Reasoning off by default | adapter | 1 | XS | ⭐ | ⭐⭐⭐ | — | None |
-| 1 | Parallel tool calls + Auto Exacto | orager | 1 | S | ⭐⭐⭐ | — | ⭐⭐ | Medium |
-| 6 | Provider routing + variants + ZDR | adapter | 1 | S | ⭐⭐ | ⭐ | ⭐⭐ | Low |
-| 2 | Skills caching | orager | 2 | S | ⭐⭐ | — | — | Low |
-| 8 | Config file vs CLI args | adapter | 2 | S | ⭐ | — | — | Low |
-| 4a | Multi-breakpoint LLM caching | orager | 2 | S | ⭐⭐ | ⭐⭐⭐ | — | Medium |
-| 4b | Cross-agent cache scope | orager | 2 | S | ⭐ | ⭐⭐ | — | Low |
-| 11 | Fallback chain + require_parameters | adapter | 2 | S | — | — | ⭐⭐⭐ | None |
-| 3 | Session summarization | orager | 3 | M | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐ | High |
-| 4d | Tool result caching | orager | 3 | M | ⭐⭐⭐ | ⭐⭐ | — | Low |
-| 10 | Structured outputs + Response Healing | orager | 3 | S | — | — | ⭐⭐⭐ | None |
-| 4c | Cache warming on daemon startup | orager | 4 | S | ⭐⭐ | — | — | Low |
-| 4e | TTL keep-alive ping | orager | 4 | S | ⭐ | — | — | Low |
-| 5 | HTTP daemon + JWT auth | orager + adapter | 5 | L | ⭐⭐⭐ | — | ⭐ | Highest |
+| # | Change | Repo | Phase | Effort | Speed | Cost | Reliability | Risk | Status |
+|---|---|---|---|---|---|---|---|---|---|
+| 9 | OpenRouter Presets | adapter | 1 | XS | — | — | ⭐⭐⭐ | None | ✅ Done |
+| 7 | Reasoning off by default | adapter | 1 | XS | ⭐ | ⭐⭐⭐ | — | None | ✅ Done |
+| 1 | Parallel tool calls + Auto Exacto | orager | 1 | S | ⭐⭐⭐ | — | ⭐⭐ | Medium | ✅ Done |
+| 6 | Provider routing + variants + ZDR | adapter | 1 | S | ⭐⭐ | ⭐ | ⭐⭐ | Low | ✅ Done |
+| 2 | Skills caching | orager | 2 | S | ⭐⭐ | — | — | Low | ✅ Done |
+| 8 | Config file vs CLI args | adapter | 2 | S | ⭐ | — | — | Low | ✅ Done |
+| 4a | Multi-breakpoint LLM caching | orager | 2 | S | ⭐⭐ | ⭐⭐⭐ | — | Medium | ✅ Done |
+| 4b | Cross-agent cache scope | orager | 2 | S | ⭐ | ⭐⭐ | — | Low | ✅ Done |
+| 11 | Fallback chain + require_parameters | adapter | 2 | S | — | — | ⭐⭐⭐ | None | ✅ Done |
+| 3 | Session summarization | orager | 3 | M | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐ | High | ✅ Done |
+| 4d | Tool result caching | orager | 3 | M | ⭐⭐⭐ | ⭐⭐ | — | Low | ✅ Done |
+| 10 | Structured outputs + Response Healing | orager | 3 | S | — | — | ⭐⭐⭐ | None | ✅ Done |
+| 4c | Cache warming on daemon startup | orager | 4 | S | ⭐⭐ | — | — | Low | ✅ Done |
+| 4e | TTL keep-alive ping | orager | 4 | S | ⭐ | — | — | Low | ✅ Done |
+| 5 | HTTP daemon + JWT auth | orager + adapter | 5 | L | ⭐⭐⭐ | — | ⭐ | Highest | ✅ Done |
 
 ---
 
