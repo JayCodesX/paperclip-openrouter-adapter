@@ -172,10 +172,13 @@ export async function executeAgentLoop(
 
   // Tool control
   const toolChoice = asString(config.tool_choice, "");
+  // Default parallel tool calls to true — matches OpenRouter's default and enables
+  // Auto Exacto optimization for tool-calling requests. Set parallel_tool_calls: false
+  // in config to disable (e.g. for strictly sequential workflows).
   const parallelToolCalls =
     typeof config.parallel_tool_calls === "boolean"
       ? config.parallel_tool_calls
-      : undefined;
+      : true;
 
   // Reasoning
   const reasoningConfig = parseObject(config.reasoning);
@@ -185,7 +188,9 @@ export async function executeAgentLoop(
     typeof reasoningConfig.max_tokens === "number"
       ? reasoningConfig.max_tokens
       : undefined;
-  const reasoningExclude = reasoningConfig.exclude === true;
+  // Default reasoning to excluded — reasoning tokens cost 2-3x and are rarely needed
+  // for routine agent tasks. Set reasoning.exclude: false to enable explicitly.
+  const reasoningExclude = reasoningConfig.exclude !== false;
 
   // Provider routing
   const providerConfig = parseObject(config.provider);
@@ -209,13 +214,28 @@ export async function executeAgentLoop(
       ? providerConfig.data_collection
       : "";
   const zdr = providerConfig.zdr === true;
+  // Default sort to "latency" for agent loops — minimizes time-to-first-token.
+  // Overridden if providerOrder is set (explicit ordering takes precedence).
+  // Set provider.sort: "price" to override back to cost-optimized routing.
   const sort =
-    typeof providerConfig.sort === "string" ? providerConfig.sort : "";
+    typeof providerConfig.sort === "string"
+      ? providerConfig.sort
+      : providerOrder
+        ? ""
+        : "latency";
+  // require_parameters: only route to providers supporting all request params.
+  // Prevents silent fallbacks to providers that ignore tool definitions.
+  const requireParameters = providerConfig.require_parameters !== false;
   const quantizations = Array.isArray(providerConfig.quantizations)
     ? providerConfig.quantizations
         .filter((s: unknown) => typeof s === "string")
         .join(",")
     : "";
+
+  // OpenRouter Preset — named server-side config for routing/model settings.
+  // Reference format: "preset-slug" or "org/preset-slug".
+  // Allows updating routing strategy without redeploying adapter.
+  const preset = typeof config.preset === "string" ? config.preset.trim() : "";
 
   // Fallback models
   const models = Array.isArray(config.models)
@@ -443,7 +463,9 @@ export async function executeAgentLoop(
   if (dataCollection) args.push("--data-collection", dataCollection);
   if (zdr) args.push("--zdr");
   if (sort) args.push("--sort", sort);
+  if (requireParameters) args.push("--require-parameters");
   if (quantizations) args.push("--quantizations", quantizations);
+  if (preset) args.push("--preset", preset);
 
   // Fallback models
   for (const m of models) args.push("--model-fallback", m);
