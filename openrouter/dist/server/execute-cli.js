@@ -51,32 +51,17 @@ function checkCostAnomaly(costUsd, agentId, runId, onLog) {
         });
     }
 }
-// ── API key rotation ───────────────────────────────────────────────────────────
-// Supports apiKeys[] array in config. On 429, rotates to the next key.
-// Module-level so rotation persists across runs in the same process.
-let _activeKeyIndex = 0;
-function getActiveApiKey(config) {
-    const keys = Array.isArray(config.apiKeys)
+// ── API key pool ──────────────────────────────────────────────────────────────
+// Collects all configured API keys (primary + apiKeys array) and returns the
+// full pool so orager can rotate through them internally on 429 errors.
+// Key rotation is handled by orager's callWithRetry — not the adapter.
+function buildApiKeyPool(config) {
+    const extra = Array.isArray(config.apiKeys)
         ? config.apiKeys.filter((k) => typeof k === "string" && k.trim().length > 0)
         : [];
-    const single = (typeof config.apiKey === "string" ? config.apiKey.trim() : "") || (process.env.OPENROUTER_API_KEY ?? "");
-    if (keys.length === 0)
-        return single;
-    // Merge: if apiKey is set and not already in the array, prepend it as index 0
-    const allKeys = single && !keys.includes(single) ? [single, ...keys] : keys;
-    return allKeys[_activeKeyIndex % allKeys.length] ?? single;
-}
-function rotateApiKey(config) {
-    const keys = Array.isArray(config.apiKeys)
-        ? config.apiKeys.filter((k) => typeof k === "string" && k.trim().length > 0)
-        : [];
-    if (keys.length <= 1)
-        return false;
-    _activeKeyIndex++;
-    return true;
-}
-function resetApiKeyIndex() {
-    _activeKeyIndex = 0;
+    const primary = (typeof config.apiKey === "string" ? config.apiKey.trim() : "") || (process.env.OPENROUTER_API_KEY ?? "");
+    const pool = primary && !extra.includes(primary) ? [primary, ...extra] : extra.length > 0 ? extra : [primary];
+    return { primary, pool };
 }
 // ── Daemon circuit breaker (per daemon URL) ────────────────────────────────
 // Tracks consecutive daemon failures per daemon URL. After DAEMON_CB_THRESHOLD
@@ -506,9 +491,6 @@ async function executeViaDaemon(baseUrl, signingKey, agentId, prompt, promptCont
     const newSessionParams = sessionId
         ? { oragerSessionId: sessionId, updatedAt: new Date().toISOString() }
         : null;
-    // Reset API key index to primary on successful run
-    if (softStop)
-        resetApiKeyIndex();
     return {
         exitCode: softStop ? 0 : 1,
         signal: null,
@@ -553,6 +535,10 @@ const DEFAULT_GRACE_SEC = 20;
  * Pick a sensible default timeout for the given model.
  * Reasoning/thinking models need more time; fast chat models need less.
  * All values are in seconds.
+ *
+ * Mirrors orager's `defaultTimeoutForModel` in loop-helpers.ts — the adapter
+ * needs this locally to set the outer process/network timeout, while orager uses
+ * it to self-terminate the loop via AbortSignal.timeout().
  */
 function defaultTimeoutForModel(model) {
     const lower = model.toLowerCase();
@@ -809,8 +795,10 @@ export async function executeAgentLoop(ctx) {
             return fromExtraArgs;
         return asStringArray(config.args);
     })();
-    // ── API key ────────────────────────────────────────────────────────────────
-    const apiKey = getActiveApiKey(config);
+    // ── API key pool ───────────────────────────────────────────────────────────
+    // The primary key is used for the subprocess env var; the full pool is passed
+    // to orager so it can rotate through keys internally on 429 errors.
+    const { primary: apiKey, pool: apiKeyPool } = buildApiKeyPool(config);
     if (!apiKey) {
         structuredLog({ level: "error", ts: Date.now(), event: "api_key_missing", agentId: agent.id, runId });
         return {
@@ -1109,6 +1097,16 @@ export async function executeAgentLoop(ctx) {
     // Multimodal prompt content
     if (promptContent)
         configObj.promptContent = promptContent;
+    // Run-level timeout — orager self-terminates via AbortSignal.timeout() when exceeded.
+    // The adapter's outer process timeout (timeoutSec + 10s grace) remains as belt-and-suspenders.
+    configObj.timeoutSec = timeoutSec;
+    // Full API key pool — orager rotates through these on 429 errors internally.
+    if (apiKeyPool.length > 1)
+        configObj.apiKeys = apiKeyPool;
+    // Required env vars — pass through so orager also validates (belt-and-suspenders
+    // for the spawn path; adapter-level check above handles daemon path).
+    if (requiredEnvVars.length > 0)
+        configObj.requiredEnvVars = requiredEnvVars;
     // Response format (JSON healing)
     const responseFormat = parseObject(config.responseFormat);
     if (typeof responseFormat.type === "string" && responseFormat.type) {
@@ -1389,6 +1387,9 @@ export async function executeAgentLoop(ctx) {
                     approvalMode,
                     ...(approvalAnswer ? { approvalAnswer } : {}),
                     ...(typeof responseFormat.type === "string" && responseFormat.type ? { response_format: responseFormat } : {}),
+                    timeoutSec,
+                    ...(apiKeyPool.length > 1 ? { apiKeys: apiKeyPool } : {}),
+                    ...(requiredEnvVars.length > 0 ? { requiredEnvVars } : {}),
                 };
                 const daemonResult = await executeViaDaemon(daemonBaseUrl, signingKey, agent.id, prompt, promptContent, daemonOpts, timeoutSec, onLog, maxCostUsdSoft);
                 if (daemonResult !== null) {
@@ -1426,18 +1427,6 @@ export async function executeAgentLoop(ctx) {
                     if (typeof daemonResult.costUsd === "number") {
                         recordRunCost(daemonResult.costUsd);
                         checkCostAnomaly(daemonResult.costUsd, agent.id, runId, onLog);
-                    }
-                    // API key rotation on 429 (daemon path — note: daemon uses its own key;
-                    // rotation here updates the index so the next spawn-path run uses a different key)
-                    const daemonSubtype = typeof daemonResult.resultJson?.subtype === "string"
-                        ? String(daemonResult.resultJson.subtype)
-                        : "";
-                    const daemonSummary = daemonResult.summary ?? "";
-                    if (daemonSubtype === "error" && /429|rate.?limit/i.test(daemonSummary)) {
-                        if (rotateApiKey(config)) {
-                            structuredLog({ level: "warn", ts: Date.now(), event: "api_key_rotated", agentId: agent.id, runId, message: "Rotated to next API key after 429" });
-                            void onLog("stderr", "[openrouter adapter] 429 detected — rotated to next API key for future runs\n");
-                        }
                     }
                     return daemonResult;
                 }
@@ -1696,9 +1685,6 @@ export async function executeAgentLoop(ctx) {
                     ...(workspaceRepoRef ? { repoRef: workspaceRepoRef } : {}),
                 }
                 : null;
-            // Reset API key index to primary on successful run
-            if (softStop)
-                resetApiKeyIndex();
             const spawnResult = {
                 exitCode: code ?? (softStop ? 0 : 1),
                 signal: null,
@@ -1760,15 +1746,6 @@ export async function executeAgentLoop(ctx) {
             // Cost anomaly detection
             recordRunCost(spawnResult.costUsd ?? 0);
             checkCostAnomaly(spawnResult.costUsd ?? 0, agent.id, runId, onLog);
-            // API key rotation on 429
-            if (typeof spawnResult.resultJson?.subtype === "string" &&
-                spawnResult.resultJson.subtype === "error" &&
-                /429|rate.?limit/i.test(spawnResult.summary ?? "")) {
-                if (rotateApiKey(config)) {
-                    structuredLog({ level: "warn", ts: Date.now(), event: "api_key_rotated", agentId: agent.id, runId, message: "Rotated to next API key after 429" });
-                    void onLog("stderr", "[openrouter adapter] 429 detected — rotated to next API key\n");
-                }
-            }
             resolve(spawnResult);
         });
         proc.on("error", (err) => {
@@ -1789,7 +1766,6 @@ export async function executeAgentLoop(ctx) {
 // ── Test helpers (exported for unit tests only) ───────────────────────────────
 export function _resetStateForTesting() {
     _costWindow.length = 0;
-    _activeKeyIndex = 0;
 }
-export { getActiveApiKey, rotateApiKey, recordRunCost, checkCostAnomaly };
+export { buildApiKeyPool, recordRunCost, checkCostAnomaly };
 //# sourceMappingURL=execute-cli.js.map

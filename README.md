@@ -140,9 +140,10 @@ paperclip-openrouter-adapter/
 **`execute-cli.ts`** — The heart of the adapter. Receives Paperclip's `execute(ctx)` call and drives the entire run. It handles:
 - Config assembly (merging Paperclip context + adapter config + defaults)
 - Wake-reason model routing (maps Paperclip trigger type to model override)
+- API key pool construction (`buildApiKeyPool`): collects `apiKey` + `apiKeys[]` into an ordered pool; the primary key goes into `OPENROUTER_API_KEY`, the full pool is passed to orager as `apiKeys` for mid-run key rotation
 - Daemon health check and JWT minting
 - Temp config file creation (chmod 600, crypto-random name, deleted before first API call)
-- Stream parsing for both daemon (NDJSON) and spawn (line-buffered stdout) paths
+- Stream parsing for both daemon (NDJSON) and spawn (line-buffered stdout) paths — including `{"type":"warn"}` events (daemon config mismatch warnings) which are routed to `onLog("stderr", ...)`
 - Session ID extraction and propagation back to Paperclip for resumption
 - Cost and usage aggregation
 - Retry logic with Retry-After header support
@@ -168,6 +169,7 @@ All fields go in the agent's adapter config. Only `apiKey` is required (or set `
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `apiKey` | string | — | **Required.** OpenRouter API key. Use a `secret_ref` in production. |
+| `apiKeys` | string[] | — | Additional OpenRouter API keys. On 429, orager rotates through the pool mid-run (key rotation) before escalating to model fallback. `apiKey` is always first in the pool. |
 | `model` | string | `deepseek/deepseek-chat-v3-0324` | Any OpenRouter model ID. |
 | `models` | string[] | — | Fallback models tried in order on 429/503. |
 | `promptTemplate` | string | built-in | User message sent every run. Supports `{{agent.name}}`, `{{context.wakeReason}}`, etc. |
@@ -408,7 +410,8 @@ Applied automatically — no config needed:
 | X-Session-Id sticky routing | auto | OpenRouter routes same session to same provider endpoint |
 | Skills cache | auto | Mtime-fingerprinted, 5-min max TTL |
 | Tool result cache | auto | Read-only tools, 30s TTL, per invocation |
-| Adaptive timeout | auto | Reasoning models: 600s; flash/mini/haiku: 120s; default: 300s |
+| Adaptive timeout | auto | Reasoning models: 600s; flash/mini/haiku: 120s; default: 300s. Logic lives in orager (`defaultTimeoutForModel`); adapter mirrors it for the outer process timeout. |
+| API key rotation | auto | When `apiKeys[]` is set, orager rotates keys mid-run on 429 before escalating to model fallback. No between-run state — each run starts fresh from the primary key. |
 | Cache hit ratio | auto | `cacheHitRatio` (0–1) in every run result |
 
 ---
@@ -446,6 +449,7 @@ export ORAGER_LOG_FILE=/var/log/orager/adapter.log
 | `soft_cost_limit` | warn | Run cost exceeded `maxCostUsdSoft` |
 | `daemon_retry` | warn | Daemon returned 503, retrying |
 | `daemon_fallback` | warn | Daemon unreachable, falling back to spawn |
+| `daemon_opts_rejected` | warn | Caller passed opts fields not on the daemon allowlist; `droppedOpts` lists the field names |
 
 Compatible with Datadog, CloudWatch, Loki, and any JSON log aggregator.
 

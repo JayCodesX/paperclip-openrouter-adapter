@@ -1,8 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   _resetStateForTesting,
-  getActiveApiKey,
-  rotateApiKey,
+  buildApiKeyPool,
   recordRunCost,
   checkCostAnomaly,
 } from "../src/server/execute-cli.js";
@@ -11,61 +10,43 @@ beforeEach(() => {
   _resetStateForTesting();
 });
 
-// ── getActiveApiKey ────────────────────────────────────────────────────────────
+// ── buildApiKeyPool ────────────────────────────────────────────────────────────
 
-describe("getActiveApiKey", () => {
-  it("returns apiKey when no apiKeys array", () => {
-    expect(getActiveApiKey({ apiKey: "sk-single" })).toBe("sk-single");
+describe("buildApiKeyPool", () => {
+  it("returns primary key when no apiKeys array", () => {
+    const { primary, pool } = buildApiKeyPool({ apiKey: "sk-single" });
+    expect(primary).toBe("sk-single");
+    expect(pool).toEqual(["sk-single"]);
   });
 
-  it("returns first key from apiKeys array", () => {
-    expect(getActiveApiKey({ apiKeys: ["sk-a", "sk-b", "sk-c"] })).toBe("sk-a");
+  it("merges apiKey + apiKeys[] with apiKey first when not already present", () => {
+    const { primary, pool } = buildApiKeyPool({ apiKey: "sk-primary", apiKeys: ["sk-secondary"] });
+    expect(primary).toBe("sk-primary");
+    expect(pool).toEqual(["sk-primary", "sk-secondary"]);
   });
 
-  it("merges apiKey + apiKeys[] — apiKey becomes index 0 if not already present", () => {
-    expect(getActiveApiKey({ apiKey: "sk-primary", apiKeys: ["sk-secondary"] })).toBe("sk-primary");
+  it("does not duplicate apiKey if already in apiKeys[]", () => {
+    const { primary, pool } = buildApiKeyPool({ apiKey: "sk-a", apiKeys: ["sk-a", "sk-b"] });
+    expect(primary).toBe("sk-a");
+    expect(pool).toEqual(["sk-a", "sk-b"]);
   });
 
-  it("does not duplicate apiKey if already present in apiKeys[]", () => {
-    // apiKey is already in the array — index 0 maps to sk-a
-    expect(getActiveApiKey({ apiKey: "sk-a", apiKeys: ["sk-a", "sk-b"] })).toBe("sk-a");
-  });
-
-  it("returns empty string when no key configured", () => {
-    expect(getActiveApiKey({})).toBe("");
+  it("returns empty primary and single-entry pool when no key configured", () => {
+    const { primary, pool } = buildApiKeyPool({});
+    expect(primary).toBe("");
+    expect(pool).toEqual([""]);
   });
 
   it("filters out empty strings from apiKeys[]", () => {
-    expect(getActiveApiKey({ apiKeys: ["", "  ", "sk-valid"] })).toBe("sk-valid");
-  });
-});
-
-// ── rotateApiKey ───────────────────────────────────────────────────────────────
-
-describe("rotateApiKey", () => {
-  it("returns false and does not rotate when only one key", () => {
-    const rotated = rotateApiKey({ apiKey: "sk-only" });
-    expect(rotated).toBe(false);
-    expect(getActiveApiKey({ apiKey: "sk-only" })).toBe("sk-only");
+    const { pool } = buildApiKeyPool({ apiKeys: ["", "  ", "sk-valid"] });
+    expect(pool).toContain("sk-valid");
+    expect(pool).not.toContain("");
+    expect(pool).not.toContain("  ");
   });
 
-  it("returns false when no keys at all", () => {
-    expect(rotateApiKey({})).toBe(false);
-  });
-
-  it("returns true and advances to next key after rotation", () => {
-    const config = { apiKeys: ["sk-a", "sk-b", "sk-c"] };
-    expect(getActiveApiKey(config)).toBe("sk-a");
-    const rotated = rotateApiKey(config);
-    expect(rotated).toBe(true);
-    expect(getActiveApiKey(config)).toBe("sk-b");
-  });
-
-  it("wraps around to first key after exhausting all keys", () => {
-    const config = { apiKeys: ["sk-x", "sk-y"] };
-    rotateApiKey(config); // → sk-y
-    rotateApiKey(config); // → sk-x (wraps)
-    expect(getActiveApiKey(config)).toBe("sk-x");
+  it("returns full pool from apiKeys[] when no primary apiKey", () => {
+    const { pool } = buildApiKeyPool({ apiKeys: ["sk-a", "sk-b", "sk-c"] });
+    expect(pool).toEqual(["sk-a", "sk-b", "sk-c"]);
   });
 });
 
