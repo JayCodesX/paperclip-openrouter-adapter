@@ -456,6 +456,39 @@ export function OpenRouterConfigFields({
         />
       </Field>
 
+      <Field
+        label="Vision fallback models"
+        hint={`Comma-separated model IDs tried in order when the primary model doesn't support image inputs. Leave blank to use the default chain: google/gemini-2.0-flash-001, openai/gpt-4o, anthropic/claude-sonnet-4-5. Set to a single space to disable fallback entirely.`}
+      >
+        <DraftInput
+          value={
+            isCreate
+              ? Array.isArray(values!.visionFallbackModels)
+                ? (values!.visionFallbackModels as string[]).join(",")
+                : ""
+              : eff(
+                  "adapterConfig",
+                  "visionFallbackModels",
+                  Array.isArray(config.visionFallbackModels)
+                    ? (config.visionFallbackModels as string[]).join(",")
+                    : "",
+                )
+          }
+          onCommit={(v) => {
+            const arr = v
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean);
+            return isCreate
+              ? set!({ visionFallbackModels: arr.length > 0 ? arr : undefined })
+              : mark("adapterConfig", "visionFallbackModels", arr.length > 0 ? arr : undefined);
+          }}
+          immediate
+          className={inputClass}
+          placeholder="google/gemini-2.0-flash-001,openai/gpt-4o"
+        />
+      </Field>
+
       {/* ===== RUN LIMITS ===== */}
       <p className={sectionHeadingClass}>Run limits</p>
 

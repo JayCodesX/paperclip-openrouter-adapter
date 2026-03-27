@@ -100,4 +100,65 @@ describe("buildOpenRouterConfig", () => {
     expect(config).not.toBeNull();
     expect(Array.isArray(config)).toBe(false);
   });
+
+  // ── fallbackModel ────────────────────────────────────────────────────────────
+
+  it("fallbackModel set → config.models is [fallbackModel]", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ fallbackModel: "openai/gpt-4o" } as Parameters<typeof makeValues>[0]),
+    );
+    expect(config.models).toEqual(["openai/gpt-4o"]);
+  });
+
+  it("fallbackModel empty string → config.models key absent", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ fallbackModel: "" } as Parameters<typeof makeValues>[0]),
+    );
+    expect(Object.prototype.hasOwnProperty.call(config, "models")).toBe(false);
+  });
+
+  it("fallbackModel unset → config.models key absent", () => {
+    const config = buildOpenRouterConfig(makeValues());
+    expect(Object.prototype.hasOwnProperty.call(config, "models")).toBe(false);
+  });
+
+  // ── visionModel ──────────────────────────────────────────────────────────────
+
+  it("visionModel set → config.visionFallbackModels is [visionModel]", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ visionModel: "openai/gpt-4o" } as Parameters<typeof makeValues>[0]),
+    );
+    expect(config.visionFallbackModels).toEqual(["openai/gpt-4o"]);
+  });
+
+  it("visionModel empty string → config.visionFallbackModels key absent", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ visionModel: "" } as Parameters<typeof makeValues>[0]),
+    );
+    expect(Object.prototype.hasOwnProperty.call(config, "visionFallbackModels")).toBe(false);
+  });
+
+  it("visionModel unset → config.visionFallbackModels key absent", () => {
+    const config = buildOpenRouterConfig(makeValues());
+    expect(Object.prototype.hasOwnProperty.call(config, "visionFallbackModels")).toBe(false);
+  });
+
+  // ── both set ─────────────────────────────────────────────────────────────────
+
+  it("both fallbackModel and visionModel set → both keys present", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({
+        fallbackModel: "anthropic/claude-sonnet-4-6",
+        visionModel: "openai/gpt-4o",
+      } as Parameters<typeof makeValues>[0]),
+    );
+    expect(config.models).toEqual(["anthropic/claude-sonnet-4-6"]);
+    expect(config.visionFallbackModels).toEqual(["openai/gpt-4o"]);
+  });
+
+  it("neither fallbackModel nor visionModel set → neither key present", () => {
+    const config = buildOpenRouterConfig(makeValues());
+    expect(Object.prototype.hasOwnProperty.call(config, "models")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(config, "visionFallbackModels")).toBe(false);
+  });
 });

@@ -27,8 +27,16 @@ export async function syncOpenRouterSkills(
   _ctx: unknown,
   desiredSkills: string[],
 ): Promise<typeof SNAPSHOT> {
-  // Validate that desired skills are non-empty strings; warn on unresolvable entries.
-  const warnings: string[] = [...SNAPSHOT.warnings];
+  // NOTE: This adapter uses mode "add-dir" — skills are loaded by orager from
+  // filesystem directories, not registered through Paperclip's sync API.
+  // Calling syncOpenRouterSkills does NOT automatically make desiredSkills
+  // available to the agent. To add skill directories at runtime, include them
+  // in config.addDirs (array of absolute paths on the server running the adapter).
+  const warnings: string[] = [
+    ...SNAPSHOT.warnings,
+    "syncOpenRouterSkills does not write skills to disk. " +
+      "Add skill directories to config.addDirs to make them available to the agent.",
+  ];
   const invalid = desiredSkills.filter((s) => typeof s !== "string" || !s.trim());
   if (invalid.length > 0) {
     warnings.push(

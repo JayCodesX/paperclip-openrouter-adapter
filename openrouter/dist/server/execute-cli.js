@@ -51,6 +51,51 @@ function checkCostAnomaly(costUsd, agentId, runId, onLog) {
         });
     }
 }
+// ── Vision support check ──────────────────────────────────────────────────────
+// Fetches OpenRouter /api/v1/models to verify the selected model reports
+// "image" in its input_modalities before sending image_url content blocks.
+// require_parameters: true (the default) filters providers that don't declare
+// vision support, but doesn't guarantee the model itself supports it — this
+// check makes the gap explicit with a structured warning.
+//
+// Returns:
+//   true  — model confirmed to support image inputs
+//   false — model confirmed NOT to support image inputs (warn loudly)
+//   null  — model not found in /models response or fetch failed (warn softly)
+//
+// Results are cached per model ID for 6 hours to avoid adding per-run latency.
+const _visionCache = new Map();
+const _VISION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+export async function checkVisionSupport(apiKey, model) {
+    const cached = _visionCache.get(model);
+    if (cached && Date.now() - cached.ts < _VISION_CACHE_TTL_MS)
+        return cached.supported;
+    const base = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/$/, "");
+    try {
+        const res = await fetch(`${base}/models`, {
+            headers: { Authorization: `Bearer ${apiKey}` },
+            signal: AbortSignal.timeout(8_000),
+        });
+        if (!res.ok) {
+            _visionCache.set(model, { supported: null, ts: Date.now() });
+            return null;
+        }
+        const json = await res.json();
+        const entry = (json.data ?? []).find((m) => m.id === model);
+        if (!entry) {
+            _visionCache.set(model, { supported: null, ts: Date.now() });
+            return null;
+        }
+        const modalities = entry.input_modalities ?? entry.architecture?.input_modalities ?? [];
+        const supported = modalities.includes("image");
+        _visionCache.set(model, { supported, ts: Date.now() });
+        return supported;
+    }
+    catch {
+        _visionCache.set(model, { supported: null, ts: Date.now() });
+        return null;
+    }
+}
 // ── API key pool ──────────────────────────────────────────────────────────────
 // Collects all configured API keys (primary + apiKeys array) and returns the
 // full pool so orager can rotate through them internally on 429 errors.
@@ -430,6 +475,9 @@ async function executeViaDaemon(baseUrl, signingKey, agentId, prompt, promptCont
                     if (typeof event.model === "string")
                         resolvedModel = event.model;
                 }
+                if (event.type === "warn" && typeof event.message === "string") {
+                    void onLog("stderr", `[openrouter adapter] ${event.message}\n`);
+                }
                 if (event.type === "result")
                     resultEvent = event;
                 // Keep the first question event — if multiple are emitted, the first is the
@@ -529,6 +577,13 @@ const DEFAULT_CLI = "orager";
 const DEFAULT_MODEL = "deepseek/deepseek-chat-v3-2";
 const DEFAULT_MAX_TURNS = 20;
 const DEFAULT_MAX_RETRIES = 3;
+// Ordered fallback chain tried when the configured model doesn't support vision.
+// Gemini 2.0 Flash first (fast + cheap), then GPT-4o, then Claude Sonnet.
+const DEFAULT_VISION_FALLBACK_MODELS = [
+    "google/gemini-2.0-flash-001",
+    "openai/gpt-4o",
+    "anthropic/claude-sonnet-4-5",
+];
 const DEFAULT_TIMEOUT_SEC = 300; // 5 min — fallback used inside defaultTimeoutForModel
 const DEFAULT_GRACE_SEC = 20;
 /**
@@ -571,13 +626,13 @@ export async function executeAgentLoop(ctx) {
     const wakeReason = typeof context.wakeReason === "string" && context.wakeReason.trim()
         ? context.wakeReason.trim()
         : "";
-    const effectiveModel = (wakeReason && typeof wakeReasonModels[wakeReason] === "string"
+    let effectiveModel = (wakeReason && typeof wakeReasonModels[wakeReason] === "string"
         ? wakeReasonModels[wakeReason]
         : null) ?? model;
     // Support both maxTurns and maxTurnsPerRun (alias for compatibility)
     const maxTurns = Math.max(0, safeNumber(config.maxTurnsPerRun ?? config.maxTurns, DEFAULT_MAX_TURNS));
     const maxRetries = Math.max(0, safeNumber(config.maxRetries, DEFAULT_MAX_RETRIES));
-    const timeoutSec = Math.max(0, safeNumber(config.timeoutSec, defaultTimeoutForModel(effectiveModel)));
+    let timeoutSec = Math.max(0, safeNumber(config.timeoutSec, defaultTimeoutForModel(effectiveModel)));
     const rawGraceSec = Math.max(0, safeNumber(config.graceSec, DEFAULT_GRACE_SEC));
     const graceSec = (timeoutSec > 0 && rawGraceSec >= timeoutSec)
         ? Math.max(1, Math.floor(timeoutSec * 0.1))
@@ -940,6 +995,67 @@ export async function executeAgentLoop(ctx) {
             })),
         ]
         : null;
+    // ── Vision capability check ───────────────────────────────────────────────
+    // When the run carries image attachments, verify the selected model actually
+    // reports image support via OpenRouter before writing config or hitting the
+    // daemon. require_parameters: true (the default) will filter providers that
+    // don't declare vision support, but the model-level check is a separate
+    // question — not all providers expose vision for every model even when the
+    // base weights support it.
+    if (promptContent !== null) {
+        const visionOk = await checkVisionSupport(apiKey, effectiveModel);
+        if (visionOk === false) {
+            // Model confirmed to not support vision. Try the fallback chain.
+            // visionFallbackModels: user-configurable list; [] disables fallback.
+            // Default chain: Gemini 2.0 Flash → GPT-4o → Claude Sonnet — all
+            // confirmed vision-capable on OpenRouter and ordered by cost/speed.
+            const fallbackCandidates = Array.isArray(config.visionFallbackModels)
+                ? config.visionFallbackModels.filter((m) => typeof m === "string" && m.trim().length > 0)
+                : DEFAULT_VISION_FALLBACK_MODELS;
+            let fallbackModel = null;
+            for (const candidate of fallbackCandidates) {
+                if (candidate === effectiveModel)
+                    continue; // skip — already failed
+                const candidateOk = await checkVisionSupport(apiKey, candidate);
+                if (candidateOk === true) {
+                    fallbackModel = candidate;
+                    break;
+                }
+            }
+            if (fallbackModel) {
+                const originalModel = effectiveModel;
+                effectiveModel = fallbackModel;
+                // Recompute timeout for the new model (only matters when not explicitly set).
+                timeoutSec = Math.max(0, safeNumber(config.timeoutSec, defaultTimeoutForModel(effectiveModel)));
+                structuredLog({
+                    level: "warn", ts: Date.now(), event: "vision_model_fallback",
+                    agentId: agent.id, runId,
+                    originalModel, fallbackModel,
+                    message: `Model "${originalModel}" does not support vision — falling back to "${fallbackModel}".`,
+                });
+                void onLog("stderr", `[openrouter adapter] model "${originalModel}" does not support image inputs — falling back to "${fallbackModel}".\n`);
+            }
+            else {
+                // No working fallback found (or fallback disabled) — warn and proceed.
+                structuredLog({
+                    level: "warn", ts: Date.now(), event: "vision_not_supported",
+                    agentId: agent.id, runId, model: effectiveModel,
+                    message: `Model "${effectiveModel}" does not support vision and no vision-capable fallback was available. Images may be silently stripped or cause an API error.`,
+                });
+                void onLog("stderr", `[openrouter adapter] WARNING: model "${effectiveModel}" does not support image inputs and no vision fallback was available — images may be silently stripped or cause an error.\n`);
+            }
+        }
+        else if (visionOk === null) {
+            // Could not verify — soft warning only, require_parameters handles provider filtering.
+            structuredLog({
+                level: "warn", ts: Date.now(), event: "vision_support_unknown",
+                agentId: agent.id, runId, model: effectiveModel,
+                message: `Could not verify vision support for "${effectiveModel}" (not found in OpenRouter /models or fetch failed). Images will be sent; require_parameters: true will filter non-vision providers.`,
+            });
+            void onLog("stderr", `[openrouter adapter] WARNING: could not verify vision support for model "${effectiveModel}" — proceeding with require_parameters: true.\n`);
+        }
+        // visionOk === true: confirmed, no action needed
+    }
     // ── Build config object and write to temp file ────────────────────────────
     // Instead of building 50+ CLI args, we write all config to a temp JSON file
     // and pass --config-file <path> as the only config arg. This avoids argument
@@ -1766,6 +1882,7 @@ export async function executeAgentLoop(ctx) {
 // ── Test helpers (exported for unit tests only) ───────────────────────────────
 export function _resetStateForTesting() {
     _costWindow.length = 0;
+    _visionCache.clear();
 }
 export { buildApiKeyPool, recordRunCost, checkCostAnomaly };
 //# sourceMappingURL=execute-cli.js.map

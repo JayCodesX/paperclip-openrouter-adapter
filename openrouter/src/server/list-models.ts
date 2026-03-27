@@ -4,7 +4,7 @@ const OPENROUTER_MODELS_ENDPOINT = "https://openrouter.ai/api/v1/models";
 const TIMEOUT_MS = 5000;
 const CACHE_TTL_MS = 60_000;
 
-type AdapterModel = { id: string; label: string };
+export type AdapterModel = { id: string; label: string; supportsVision: boolean };
 
 let cached: { expiresAt: number; models: AdapterModel[] } | null = null;
 
@@ -27,7 +27,13 @@ async function fetchModels(): Promise<AdapterModel[]> {
       const id = typeof r.id === "string" ? r.id.trim() : "";
       if (!id) continue;
       const name = typeof r.name === "string" ? r.name.trim() : "";
-      models.push({ id, label: name || id });
+      const arch = typeof r.architecture === "object" && r.architecture !== null
+        ? r.architecture as Record<string, unknown>
+        : null;
+      const modalities =
+        r.input_modalities ?? arch?.input_modalities ?? [];
+      const supportsVision = Array.isArray(modalities) && modalities.includes("image");
+      models.push({ id, label: name || id, supportsVision });
     }
     return models;
   } catch {
@@ -51,4 +57,18 @@ export async function listOpenRouterModels(): Promise<AdapterModel[]> {
   if (cached && cached.models.length > 0) return cached.models;
 
   return fallbackModels;
+}
+
+// Synchronous read of the live cache — no fetch triggered.
+// Used by checkVisionSupport to avoid a redundant network call when the shared
+// list is already warm (populated by a prior listOpenRouterModels call).
+// Returns undefined if the cache is cold or expired.
+export function getModelFromLiveCache(model: string): AdapterModel | undefined {
+  const now = Date.now();
+  if (!cached || cached.expiresAt <= now) return undefined;
+  return cached.models.find((m) => m.id === model);
+}
+
+export function _resetModelCacheForTesting(): void {
+  cached = null;
 }

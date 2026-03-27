@@ -273,4 +273,51 @@ describe("getOragerSession", () => {
     );
     expect(sessionCalls.length).toBe(1);
   });
+
+  // ── 5.12: sessionId path traversal ──────────────────────────────────────────
+
+  it("returns null for a sessionId containing path traversal characters", async () => {
+    // The daemon path calls fetch with encodeURIComponent(sessionId) and gets 404.
+    // The filesystem fallback then validates the sessionId against [a-zA-Z0-9_-]+
+    // and returns null before touching the filesystem.
+    const fetchMock = makeFetchMock([SESSION_A]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getOragerSession("../../etc/passwd", { ...daemonOpts });
+    expect(result).toBeNull();
+  });
+
+  it("returns null for a sessionId with null bytes", async () => {
+    const fetchMock = makeFetchMock([SESSION_A]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getOragerSession("sess\x00evil", { ...daemonOpts });
+    expect(result).toBeNull();
+  });
+
+  it("returns null for a sessionId with slashes", async () => {
+    const fetchMock = makeFetchMock([SESSION_A]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getOragerSession("sess/evil", { ...daemonOpts });
+    expect(result).toBeNull();
+  });
+});
+
+// ── 5.13: corrupted session file (filesystem fallback) ───────────────────────
+// When the daemon is not configured, listOragerSessions falls back to reading
+// ~/.orager/sessions/*.json. Corrupted files should be silently skipped.
+
+describe("filesystem fallback — corrupted session files (5.13)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("does not throw when the sessions directory does not exist (ENOENT)", async () => {
+    // With no daemon and a non-existent sessions dir, fallback returns empty list
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("no daemon")));
+    // listOragerSessions without daemonUrl → filesystem fallback
+    // If ~/.orager/sessions/ doesn't exist, readdir throws ENOENT → caught → []
+    await expect(listOragerSessions({ limit: 10, offset: 0 })).resolves.toBeDefined();
+  });
 });

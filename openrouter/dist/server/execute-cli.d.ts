@@ -1,5 +1,6 @@
 declare function recordRunCost(costUsd: number): void;
 declare function checkCostAnomaly(costUsd: number, agentId: string, runId: string, onLog: (stream: "stdout" | "stderr", line: string) => Promise<void> | void): void;
+export declare function checkVisionSupport(apiKey: string, model: string): Promise<boolean | null>;
 declare function buildApiKeyPool(config: Record<string, unknown>): {
     primary: string;
     pool: string[];

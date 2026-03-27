@@ -303,6 +303,43 @@ turnModelRules:
 | `preset` | string | OpenRouter named preset slug (server-side routing/model config) |
 | `transforms` | string[] | Context transforms, e.g. `["middle-out"]` for automatic compression |
 
+### Agent behavior (orager-exclusive)
+
+These fields are specific to orager and have no equivalent in the claude-local adapter.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `planMode` | boolean | `false` | Run in plan-only mode — orager describes what it would do without executing tools. Useful for code review workflows that should never touch the filesystem. |
+| `injectContext` | boolean | `false` | Inject Paperclip workspace context (open files, current selection) into the system prompt automatically. |
+| `tagToolOutputs` | boolean | `true` | Wrap tool outputs in XML tags (`<tool_output>…</tool_output>`) for model visibility. Recommended on; some models respond better without it on long tool chains. |
+| `trackFileChanges` | boolean | `false` | Track files written or deleted during the run. `filesChanged` is included in `resultJson` at run end. Useful for code-writing workflows that need to report changed files to Paperclip. |
+| `enableBrowserTools` | boolean | `false` | Enable Playwright-backed browser tools (navigate, click, fill, screenshot). Requires `playwright` installed in the orager process environment. |
+| `hooks` | object | — | Shell commands that fire on specific orager events. Keys are event names (`preToolUse`, `postToolUse`, `stop`), values are shell command strings. Runs in the agent's `cwd`. |
+| `bashPolicy` | object | — | Fine-grained bash execution controls. Sub-fields: `allow` (string[], glob patterns to auto-approve), `deny` (string[], glob patterns to auto-reject), `defaultBehavior` (`"allow"` \| `"reject"` \| `"ask"`). Example: `{ allow: ["git *", "npm test"], deny: ["rm -rf *"], defaultBehavior: "ask" }` |
+
+#### hooks example
+
+```yaml
+hooks:
+  preToolUse: "echo 'Running tool' >> /tmp/orager-audit.log"
+  postToolUse: "echo 'Tool done' >> /tmp/orager-audit.log"
+  stop: "slack-notify 'Agent finished run'"
+```
+
+#### bashPolicy example
+
+```yaml
+bashPolicy:
+  allow:
+    - "git *"
+    - "npm *"
+    - "pytest *"
+  deny:
+    - "rm -rf *"
+    - "sudo *"
+  defaultBehavior: "ask"
+```
+
 ---
 
 ## Daemon mode
@@ -449,7 +486,29 @@ export ORAGER_LOG_FILE=/var/log/orager/adapter.log
 | `soft_cost_limit` | warn | Run cost exceeded `maxCostUsdSoft` |
 | `daemon_retry` | warn | Daemon returned 503, retrying |
 | `daemon_fallback` | warn | Daemon unreachable, falling back to spawn |
+| `daemon_retry` | warn | Daemon returned 503, retrying |
+| `daemon_fallback` | warn | Daemon unreachable, falling back to spawn |
 | `daemon_opts_rejected` | warn | Caller passed opts fields not on the daemon allowlist; `droppedOpts` lists the field names |
+| `session_lost` | warn | Orager reported the requested session was not found; `clearSession: true` in result |
+| `missing_cost_data` | warn | orager result event missing `total_cost_usd` field |
+| `daemon_key_unsafe_permissions` | warn | `~/.orager/daemon.key` has world-readable permissions (should be 600) |
+
+#### Common fields in every log line
+
+| Field | Type | Description |
+|---|---|---|
+| `level` | string | `"info"`, `"warn"`, or `"error"` |
+| `ts` | number | Unix timestamp in milliseconds |
+| `event` | string | Event name (see table above) |
+| `agentId` | string | Paperclip agent ID (most events) |
+| `runId` | string | Unique ID for this run (most events) |
+| `model` | string | Requested model (run events) |
+| `durationMs` | number | Run duration in ms (`run_complete`) |
+| `inputTokens` | number | Total input tokens (`run_complete`) |
+| `outputTokens` | number | Total output tokens (`run_complete`) |
+| `costUsd` | number | Total cost in USD (`run_complete`) |
+| `cacheHitRatio` | number | Fraction of input tokens served from cache (`run_complete`) |
+| `turnCount` | number | Number of agent turns completed (`run_complete`) |
 
 Compatible with Datadog, CloudWatch, Loki, and any JSON log aggregator.
 

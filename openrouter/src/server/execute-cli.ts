@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import os from "node:os";
 import crypto from "node:crypto";
 import { mintDaemonJwt } from "./jwt-utils.js";
+import { getModelFromLiveCache, _resetModelCacheForTesting } from "./list-models.js";
 
 // ── Structured logging ────────────────────────────────────────────────────────
 // When ORAGER_LOG_FILE is set, JSON structured log lines are appended to that
@@ -79,6 +80,69 @@ function checkCostAnomaly(
   }
 }
 
+// ── Vision support check ──────────────────────────────────────────────────────
+// Fetches OpenRouter /api/v1/models to verify the selected model reports
+// "image" in its input_modalities before sending image_url content blocks.
+// require_parameters: true (the default) filters providers that don't declare
+// vision support, but doesn't guarantee the model itself supports it — this
+// check makes the gap explicit with a structured warning.
+//
+// Returns:
+//   true  — model confirmed to support image inputs
+//   false — model confirmed NOT to support image inputs (warn loudly)
+//   null  — model not found in /models response or fetch failed (warn softly)
+//
+// Results are cached per model ID for 6 hours to avoid adding per-run latency.
+
+const _visionCache = new Map<string, { supported: boolean | null; ts: number }>();
+const _VISION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+
+export async function checkVisionSupport(apiKey: string, model: string): Promise<boolean | null> {
+  const cached = _visionCache.get(model);
+  if (cached && Date.now() - cached.ts < _VISION_CACHE_TTL_MS) return cached.supported;
+
+  // Prefer the shared model list when it's already in memory — avoids a redundant
+  // fetch on every run. The list is populated by listOpenRouterModels() (e.g. called
+  // by the UI model dropdown), so no additional network call is needed here.
+  const liveEntry = getModelFromLiveCache(model);
+  if (liveEntry !== undefined) {
+    _visionCache.set(model, { supported: liveEntry.supportsVision, ts: Date.now() });
+    return liveEntry.supportsVision;
+  }
+
+  const base = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/$/, "");
+  try {
+    const res = await fetch(`${base}/models`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) {
+      _visionCache.set(model, { supported: null, ts: Date.now() });
+      return null;
+    }
+    const json = await res.json() as {
+      data?: Array<{
+        id: string;
+        input_modalities?: string[];
+        architecture?: { input_modalities?: string[] };
+      }>;
+    };
+    const entry = (json.data ?? []).find((m) => m.id === model);
+    if (!entry) {
+      _visionCache.set(model, { supported: null, ts: Date.now() });
+      return null;
+    }
+    const modalities =
+      entry.input_modalities ?? entry.architecture?.input_modalities ?? [];
+    const supported = modalities.includes("image");
+    _visionCache.set(model, { supported, ts: Date.now() });
+    return supported;
+  } catch {
+    _visionCache.set(model, { supported: null, ts: Date.now() });
+    return null;
+  }
+}
+
 // ── API key pool ──────────────────────────────────────────────────────────────
 // Collects all configured API keys (primary + apiKeys array) and returns the
 // full pool so orager can rotate through them internally on 429 errors.
@@ -92,6 +156,12 @@ function buildApiKeyPool(config: Record<string, unknown>): { primary: string; po
   const pool = primary && !extra.includes(primary) ? [primary, ...extra] : extra.length > 0 ? extra : [primary];
   return { primary, pool };
 }
+
+// Emitted by orager to stderr when a requested session isn't found on disk.
+// We detect this string to clear the stale session ID on the Paperclip side.
+// Exported so tests can assert on the exact marker without magic strings.
+// Source: ~/Projects/orager/src/loop.ts — search for "starting fresh"
+export const SESSION_NOT_FOUND_MARKER = "not found, starting fresh";
 
 // ── Daemon circuit breaker (per daemon URL) ────────────────────────────────
 // Tracks consecutive daemon failures per daemon URL. After DAEMON_CB_THRESHOLD
@@ -144,6 +214,17 @@ async function readDaemonSigningKey(
     ]);
     const trimmed = key.trim();
     if (!trimmed) return null;
+
+    // Warn if the key file is readable by group or world — anyone on the system
+    // with that access could forge daemon JWTs and execute arbitrary agent runs.
+    if (stat.mode & 0o077) {
+      const modeOctal = (stat.mode & 0o777).toString(8).padStart(3, "0");
+      const msg =
+        `[openrouter adapter] WARNING: daemon signing key at ${DAEMON_KEY_PATH} has unsafe permissions (${modeOctal}). ` +
+        `Run: chmod 600 ${DAEMON_KEY_PATH}`;
+      if (onLog) void onLog("stderr", msg + "\n");
+      structuredLog({ level: "warn", ts: Date.now(), event: "daemon_key_unsafe_permissions", keyPath: DAEMON_KEY_PATH, mode: modeOctal });
+    }
 
     const ageMs = Date.now() - stat.mtimeMs;
     if (ageMs > DAEMON_KEY_MAX_AGE_MS && onLog && !_daemonKeyAgeWarningEmitted) {
@@ -506,18 +587,25 @@ async function executeViaDaemon(
         void onLog("stderr",
           `[openrouter adapter] WARNING: oversized stream segment (~${discarded.length} bytes) may contain a result/question event — attempting to parse\n`
         );
+        structuredLog({ level: "warn", ts: Date.now(), event: "daemon_oversized_segment_critical", agentId, segmentBytes: discarded.length, message: "Oversized segment contains result/question event — attempting recovery" });
         // Try to extract and process the critical event from the oversized line
         const criticalMatch = discarded.match(/\{"type":"(?:result|question)"[^\n]*/);
         if (criticalMatch) {
           try {
             const event = JSON.parse(criticalMatch[0]) as Record<string, unknown>;
             if (event.type === "result") resultEvent = event;
-          } catch { /* best effort */ }
+          } catch {
+            // Parse failed — the result event is unrecoverable. Log so operators
+            // know the run will end with a synthesised error rather than silently.
+            structuredLog({ level: "error", ts: Date.now(), event: "daemon_oversized_segment_unrecoverable", agentId, segmentBytes: discarded.length, message: "Could not parse result event from oversized segment — run will end with synthesised error" });
+            void onLog("stderr", `[openrouter adapter] ERROR: could not parse result event from oversized segment (${discarded.length} bytes) — run result lost\n`);
+          }
         }
       } else {
         void onLog("stderr",
           `[openrouter adapter] daemon stream segment exceeded ${MAX_STREAM_BUFFER_BYTES} bytes — discarding oversized segment\n`
         );
+        structuredLog({ level: "warn", ts: Date.now(), event: "daemon_oversized_segment_discarded", agentId, segmentBytes: discarded.length });
       }
       // Skip forward to the next newline to resync the parser
       buffer = nextNewline >= 0 ? buffer.slice(nextNewline + 1) : "";
@@ -648,9 +736,16 @@ async function executeViaDaemon(
 }
 
 const DEFAULT_CLI = "orager";
-const DEFAULT_MODEL = "deepseek/deepseek-chat-v3-2";
+const DEFAULT_MODEL = "deepseek/deepseek-chat-v3-0324";
 const DEFAULT_MAX_TURNS = 20;
 const DEFAULT_MAX_RETRIES = 3;
+// Ordered fallback chain tried when the configured model doesn't support vision.
+// Gemini 2.0 Flash first (fast + cheap), then GPT-4o, then Claude Sonnet.
+const DEFAULT_VISION_FALLBACK_MODELS = [
+  "google/gemini-2.0-flash-001",
+  "openai/gpt-4o",
+  "anthropic/claude-sonnet-4-5",
+];
 const DEFAULT_TIMEOUT_SEC = 300; // 5 min — fallback used inside defaultTimeoutForModel
 const DEFAULT_GRACE_SEC = 20;
 
@@ -699,7 +794,7 @@ export async function executeAgentLoop(
     typeof context.wakeReason === "string" && context.wakeReason.trim()
       ? context.wakeReason.trim()
       : "";
-  const effectiveModel =
+  let effectiveModel =
     (wakeReason && typeof wakeReasonModels[wakeReason] === "string"
       ? (wakeReasonModels[wakeReason] as string)
       : null) ?? model;
@@ -710,7 +805,7 @@ export async function executeAgentLoop(
     DEFAULT_MAX_TURNS,
   ));
   const maxRetries = Math.max(0, safeNumber(config.maxRetries, DEFAULT_MAX_RETRIES));
-  const timeoutSec = Math.max(0, safeNumber(config.timeoutSec, defaultTimeoutForModel(effectiveModel)));
+  let timeoutSec = Math.max(0, safeNumber(config.timeoutSec, defaultTimeoutForModel(effectiveModel)));
   const rawGraceSec = Math.max(0, safeNumber(config.graceSec, DEFAULT_GRACE_SEC));
   const graceSec = (timeoutSec > 0 && rawGraceSec >= timeoutSec)
     ? Math.max(1, Math.floor(timeoutSec * 0.1))
@@ -1177,6 +1272,75 @@ export async function executeAgentLoop(
         ]
       : null;
 
+  // ── Vision capability check ───────────────────────────────────────────────
+  // When the run carries image attachments, verify the selected model actually
+  // reports image support via OpenRouter before writing config or hitting the
+  // daemon. require_parameters: true (the default) will filter providers that
+  // don't declare vision support, but the model-level check is a separate
+  // question — not all providers expose vision for every model even when the
+  // base weights support it.
+  if (promptContent !== null) {
+    const visionOk = await checkVisionSupport(apiKey, effectiveModel);
+    if (visionOk === false) {
+      // Model confirmed to not support vision. Try the fallback chain.
+      // visionFallbackModels: user-configurable list; [] disables fallback.
+      // Default chain: Gemini 2.0 Flash → GPT-4o → Claude Sonnet — all
+      // confirmed vision-capable on OpenRouter and ordered by cost/speed.
+      const fallbackCandidates: string[] = Array.isArray(config.visionFallbackModels)
+        ? (config.visionFallbackModels as unknown[]).filter(
+            (m): m is string => typeof m === "string" && m.trim().length > 0,
+          )
+        : DEFAULT_VISION_FALLBACK_MODELS;
+
+      let fallbackModel: string | null = null;
+      for (const candidate of fallbackCandidates) {
+        if (candidate === effectiveModel) continue; // skip — already failed
+        const candidateOk = await checkVisionSupport(apiKey, candidate);
+        if (candidateOk === true) {
+          fallbackModel = candidate;
+          break;
+        }
+      }
+
+      if (fallbackModel) {
+        const originalModel = effectiveModel;
+        effectiveModel = fallbackModel;
+        // Recompute timeout for the new model (only matters when not explicitly set).
+        timeoutSec = Math.max(0, safeNumber(config.timeoutSec, defaultTimeoutForModel(effectiveModel)));
+        structuredLog({
+          level: "warn", ts: Date.now(), event: "vision_model_fallback",
+          agentId: agent.id, runId,
+          originalModel, fallbackModel,
+          message: `Model "${originalModel}" does not support vision — falling back to "${fallbackModel}".`,
+        });
+        void onLog("stderr",
+          `[openrouter adapter] model "${originalModel}" does not support image inputs — falling back to "${fallbackModel}".\n`,
+        );
+      } else {
+        // No working fallback found (or fallback disabled) — warn and proceed.
+        structuredLog({
+          level: "warn", ts: Date.now(), event: "vision_not_supported",
+          agentId: agent.id, runId, model: effectiveModel,
+          message: `Model "${effectiveModel}" does not support vision and no vision-capable fallback was available. Images may be silently stripped or cause an API error.`,
+        });
+        void onLog("stderr",
+          `[openrouter adapter] WARNING: model "${effectiveModel}" does not support image inputs and no vision fallback was available — images may be silently stripped or cause an error.\n`,
+        );
+      }
+    } else if (visionOk === null) {
+      // Could not verify — soft warning only, require_parameters handles provider filtering.
+      structuredLog({
+        level: "warn", ts: Date.now(), event: "vision_support_unknown",
+        agentId: agent.id, runId, model: effectiveModel,
+        message: `Could not verify vision support for "${effectiveModel}" (not found in OpenRouter /models or fetch failed). Images will be sent; require_parameters: true will filter non-vision providers.`,
+      });
+      void onLog("stderr",
+        `[openrouter adapter] WARNING: could not verify vision support for model "${effectiveModel}" — proceeding with require_parameters: true.\n`,
+      );
+    }
+    // visionOk === true: confirmed, no action needed
+  }
+
   // ── Build config object and write to temp file ────────────────────────────
   // Instead of building 50+ CLI args, we write all config to a temp JSON file
   // and pass --config-file <path> as the only config arg. This avoids argument
@@ -1293,6 +1457,7 @@ export async function executeAgentLoop(
   // Required env vars — pass through so orager also validates (belt-and-suspenders
   // for the spawn path; adapter-level check above handles daemon path).
   if (requiredEnvVars.length > 0) configObj.requiredEnvVars = requiredEnvVars;
+  configObj.memoryKey = agent.id;
 
   // Response format (JSON healing)
   const responseFormat = parseObject(config.responseFormat);
@@ -1585,6 +1750,7 @@ export async function executeAgentLoop(
         timeoutSec,
         ...(apiKeyPool.length > 1 ? { apiKeys: apiKeyPool } : {}),
         ...(requiredEnvVars.length > 0 ? { requiredEnvVars } : {}),
+        memoryKey: agent.id,
       };
 
       const daemonResult = await executeViaDaemon(
@@ -1692,6 +1858,17 @@ export async function executeAgentLoop(
   }
 
   // ── Spawn orager ───────────────────────────────────────────────────────────
+  // detached: true — puts orager in its own process group so that on timeout
+  // we can send SIGTERM/SIGKILL to the entire group (orager + any subprocesses
+  // it spawned, e.g. bash commands) via process.kill(-(proc.pid!), signal).
+  // Without detached the kill would only reach orager itself, leaving bash
+  // children as orphans.
+  //
+  // proc.unref() — allows the Node.js event loop to exit even if orager is still
+  // running. This is intentional: if Paperclip restarts or the adapter process
+  // is killed while a run is in flight, the orphaned orager will continue until
+  // its own timeout fires. The alternative (keeping Node alive) is worse for
+  // Paperclip availability. The timeout + grace SIGKILL is the cleanup path.
   return new Promise<AdapterExecutionResult>((resolve) => {
     let proc: ReturnType<typeof spawn>;
     try {
@@ -1813,7 +1990,10 @@ export async function executeAgentLoop(
       // found. Detect this so we can clear the stale session ID on Paperclip's
       // side, ensuring the next run is treated as a fresh start (with
       // instructions re-injected via --system-prompt-file).
-      if (text.includes("not found, starting fresh")) sessionLost = true;
+      if (text.includes(SESSION_NOT_FOUND_MARKER)) {
+        sessionLost = true;
+        structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId: agent.id, runId, sessionId: previousSessionId ?? undefined });
+      }
       void onLog("stderr", text);
     });
 
@@ -1929,6 +2109,7 @@ export async function executeAgentLoop(
         errorMessage: softStop
           ? undefined
           : `Agent loop ended: ${subtype}${resultText ? ` — ${resultText}` : ""}`,
+        errorCode: softStop ? undefined : subtype,
         clearSession,
         model: resolvedModel || undefined,
         usage: usageRaw
@@ -1961,6 +2142,7 @@ export async function executeAgentLoop(
           totalCostUsd,
           cacheHitRatio: Math.round(cacheHitRatio * 100) / 100,
           turnCount: typeof resultEvent?.turnCount === "number" ? resultEvent.turnCount : undefined,
+          filesChanged: Array.isArray(resultEvent?.filesChanged) ? resultEvent.filesChanged as string[] : undefined,
         },
         question: questionEvent
           ? { prompt: questionEvent.prompt, choices: questionEvent.choices }
@@ -2006,5 +2188,20 @@ export async function executeAgentLoop(
 // ── Test helpers (exported for unit tests only) ───────────────────────────────
 export function _resetStateForTesting(): void {
   _costWindow.length = 0;
+  _visionCache.clear();
+  _daemonCircuitState.clear();
+  _resetModelCacheForTesting();
 }
-export { buildApiKeyPool, recordRunCost, checkCostAnomaly };
+export {
+  buildApiKeyPool,
+  recordRunCost,
+  checkCostAnomaly,
+  DEFAULT_MODEL,
+  DAEMON_KEY_PATH,
+  DAEMON_KEY_MAX_AGE_MS,
+  isDaemonCircuitOpen,
+  recordDaemonFailure,
+  recordDaemonSuccess,
+  DAEMON_CB_THRESHOLD,
+  DAEMON_CB_RESET_MS,
+};
