@@ -6,6 +6,10 @@ import {
   recordRunCost,
   checkCostAnomaly,
 } from "../src/server/execute-cli.js";
+import {
+  listOpenRouterModels,
+  _resetModelCacheForTesting,
+} from "../src/server/list-models.js";
 
 beforeEach(() => {
   _resetStateForTesting();
@@ -158,6 +162,29 @@ describe("checkVisionSupport", () => {
     await checkVisionSupport(API_KEY, "openai/gpt-4o");
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses shared model list cache before fetching", async () => {
+    // Populate the shared live model cache via listOpenRouterModels
+    _resetModelCacheForTesting();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          data: [{ id: "openai/gpt-4o", name: "GPT-4o", input_modalities: ["text", "image"] }],
+        }),
+      }),
+    );
+    await listOpenRouterModels();
+
+    // Replace fetch with a tracker — checkVisionSupport should NOT call it
+    const fetchTracker = vi.fn();
+    vi.stubGlobal("fetch", fetchTracker);
+
+    const result = await checkVisionSupport(API_KEY, "openai/gpt-4o");
+    expect(result).toBe(true);
+    expect(fetchTracker).not.toHaveBeenCalled();
   });
 
   it("uses OPENROUTER_BASE_URL env var when set", async () => {

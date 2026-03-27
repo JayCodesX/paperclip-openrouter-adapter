@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import os from "node:os";
 import crypto from "node:crypto";
 import { mintDaemonJwt } from "./jwt-utils.js";
+import { getModelFromLiveCache, _resetModelCacheForTesting } from "./list-models.js";
 
 // ── Structured logging ────────────────────────────────────────────────────────
 // When ORAGER_LOG_FILE is set, JSON structured log lines are appended to that
@@ -99,6 +100,15 @@ const _VISION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 export async function checkVisionSupport(apiKey: string, model: string): Promise<boolean | null> {
   const cached = _visionCache.get(model);
   if (cached && Date.now() - cached.ts < _VISION_CACHE_TTL_MS) return cached.supported;
+
+  // Prefer the shared model list when it's already in memory — avoids a redundant
+  // fetch on every run. The list is populated by listOpenRouterModels() (e.g. called
+  // by the UI model dropdown), so no additional network call is needed here.
+  const liveEntry = getModelFromLiveCache(model);
+  if (liveEntry !== undefined) {
+    _visionCache.set(model, { supported: liveEntry.supportsVision, ts: Date.now() });
+    return liveEntry.supportsVision;
+  }
 
   const base = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/$/, "");
   try {
@@ -2139,5 +2149,6 @@ export async function executeAgentLoop(
 export function _resetStateForTesting(): void {
   _costWindow.length = 0;
   _visionCache.clear();
+  _resetModelCacheForTesting();
 }
 export { buildApiKeyPool, recordRunCost, checkCostAnomaly };
