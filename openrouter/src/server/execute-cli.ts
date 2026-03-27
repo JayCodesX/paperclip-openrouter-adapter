@@ -79,6 +79,60 @@ function checkCostAnomaly(
   }
 }
 
+// ── Vision support check ──────────────────────────────────────────────────────
+// Fetches OpenRouter /api/v1/models to verify the selected model reports
+// "image" in its input_modalities before sending image_url content blocks.
+// require_parameters: true (the default) filters providers that don't declare
+// vision support, but doesn't guarantee the model itself supports it — this
+// check makes the gap explicit with a structured warning.
+//
+// Returns:
+//   true  — model confirmed to support image inputs
+//   false — model confirmed NOT to support image inputs (warn loudly)
+//   null  — model not found in /models response or fetch failed (warn softly)
+//
+// Results are cached per model ID for 6 hours to avoid adding per-run latency.
+
+const _visionCache = new Map<string, { supported: boolean | null; ts: number }>();
+const _VISION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+
+export async function checkVisionSupport(apiKey: string, model: string): Promise<boolean | null> {
+  const cached = _visionCache.get(model);
+  if (cached && Date.now() - cached.ts < _VISION_CACHE_TTL_MS) return cached.supported;
+
+  const base = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/$/, "");
+  try {
+    const res = await fetch(`${base}/models`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) {
+      _visionCache.set(model, { supported: null, ts: Date.now() });
+      return null;
+    }
+    const json = await res.json() as {
+      data?: Array<{
+        id: string;
+        input_modalities?: string[];
+        architecture?: { input_modalities?: string[] };
+      }>;
+    };
+    const entry = (json.data ?? []).find((m) => m.id === model);
+    if (!entry) {
+      _visionCache.set(model, { supported: null, ts: Date.now() });
+      return null;
+    }
+    const modalities =
+      entry.input_modalities ?? entry.architecture?.input_modalities ?? [];
+    const supported = modalities.includes("image");
+    _visionCache.set(model, { supported, ts: Date.now() });
+    return supported;
+  } catch {
+    _visionCache.set(model, { supported: null, ts: Date.now() });
+    return null;
+  }
+}
+
 // ── API key pool ──────────────────────────────────────────────────────────────
 // Collects all configured API keys (primary + apiKeys array) and returns the
 // full pool so orager can rotate through them internally on 429 errors.
@@ -1177,6 +1231,37 @@ export async function executeAgentLoop(
         ]
       : null;
 
+  // ── Vision capability check ───────────────────────────────────────────────
+  // When the run carries image attachments, verify the selected model actually
+  // reports image support via OpenRouter before writing config or hitting the
+  // daemon. require_parameters: true (the default) will filter providers that
+  // don't declare vision support, but the model-level check is a separate
+  // question — not all providers expose vision for every model even when the
+  // base weights support it.
+  if (promptContent !== null) {
+    const visionOk = await checkVisionSupport(apiKey, effectiveModel);
+    if (visionOk === false) {
+      structuredLog({
+        level: "warn", ts: Date.now(), event: "vision_not_supported",
+        agentId: agent.id, runId, model: effectiveModel,
+        message: `Model "${effectiveModel}" does not report image input support via OpenRouter. Images will be sent but may be silently stripped or cause an API error.`,
+      });
+      void onLog("stderr",
+        `[openrouter adapter] WARNING: model "${effectiveModel}" does not support image inputs via OpenRouter — images may be silently stripped or cause an error.\n`,
+      );
+    } else if (visionOk === null) {
+      structuredLog({
+        level: "warn", ts: Date.now(), event: "vision_support_unknown",
+        agentId: agent.id, runId, model: effectiveModel,
+        message: `Could not verify vision support for "${effectiveModel}" (not found in OpenRouter /models or fetch failed). Images will be sent; require_parameters: true will filter non-vision providers.`,
+      });
+      void onLog("stderr",
+        `[openrouter adapter] WARNING: could not verify vision support for model "${effectiveModel}" — proceeding with require_parameters: true.\n`,
+      );
+    }
+    // visionOk === true: confirmed, no warning needed
+  }
+
   // ── Build config object and write to temp file ────────────────────────────
   // Instead of building 50+ CLI args, we write all config to a temp JSON file
   // and pass --config-file <path> as the only config arg. This avoids argument
@@ -2006,5 +2091,6 @@ export async function executeAgentLoop(
 // ── Test helpers (exported for unit tests only) ───────────────────────────────
 export function _resetStateForTesting(): void {
   _costWindow.length = 0;
+  _visionCache.clear();
 }
 export { buildApiKeyPool, recordRunCost, checkCostAnomaly };

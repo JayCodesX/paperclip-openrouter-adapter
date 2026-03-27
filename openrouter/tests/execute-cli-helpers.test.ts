@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import {
   _resetStateForTesting,
   buildApiKeyPool,
+  checkVisionSupport,
   recordRunCost,
   checkCostAnomaly,
 } from "../src/server/execute-cli.js";
@@ -47,6 +48,116 @@ describe("buildApiKeyPool", () => {
   it("returns full pool from apiKeys[] when no primary apiKey", () => {
     const { pool } = buildApiKeyPool({ apiKeys: ["sk-a", "sk-b", "sk-c"] });
     expect(pool).toEqual(["sk-a", "sk-b", "sk-c"]);
+  });
+});
+
+// ── checkVisionSupport ────────────────────────────────────────────────────────
+
+describe("checkVisionSupport", () => {
+  const API_KEY = "sk-test";
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function mockFetch(response: { ok: boolean; data?: unknown }) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: response.ok,
+        json: async () => response.data ?? {},
+      }),
+    );
+  }
+
+  it("returns true when model reports image in input_modalities", async () => {
+    mockFetch({
+      ok: true,
+      data: {
+        data: [
+          { id: "openai/gpt-4o", input_modalities: ["text", "image"] },
+        ],
+      },
+    });
+    expect(await checkVisionSupport(API_KEY, "openai/gpt-4o")).toBe(true);
+  });
+
+  it("returns false when model is present but has no image modality", async () => {
+    mockFetch({
+      ok: true,
+      data: {
+        data: [
+          { id: "openai/gpt-4-turbo", input_modalities: ["text"] },
+        ],
+      },
+    });
+    expect(await checkVisionSupport(API_KEY, "openai/gpt-4-turbo")).toBe(false);
+  });
+
+  it("returns true when image is only in architecture.input_modalities", async () => {
+    mockFetch({
+      ok: true,
+      data: {
+        data: [
+          {
+            id: "meta-llama/llama-3.2-11b-vision-instruct",
+            architecture: { input_modalities: ["text", "image"] },
+          },
+        ],
+      },
+    });
+    expect(
+      await checkVisionSupport(API_KEY, "meta-llama/llama-3.2-11b-vision-instruct"),
+    ).toBe(true);
+  });
+
+  it("returns null when model is not found in /models response", async () => {
+    mockFetch({
+      ok: true,
+      data: { data: [{ id: "some/other-model", input_modalities: ["text"] }] },
+    });
+    expect(await checkVisionSupport(API_KEY, "unknown/model")).toBeNull();
+  });
+
+  it("returns null when fetch returns non-ok status", async () => {
+    mockFetch({ ok: false });
+    expect(await checkVisionSupport(API_KEY, "openai/gpt-4o")).toBeNull();
+  });
+
+  it("returns null when fetch throws (network error)", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network error")));
+    expect(await checkVisionSupport(API_KEY, "openai/gpt-4o")).toBeNull();
+  });
+
+  it("returns cached result on second call without re-fetching", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [{ id: "openai/gpt-4o", input_modalities: ["text", "image"] }],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await checkVisionSupport(API_KEY, "openai/gpt-4o");
+    await checkVisionSupport(API_KEY, "openai/gpt-4o");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-fetches after cache is cleared by _resetStateForTesting", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [{ id: "openai/gpt-4o", input_modalities: ["text", "image"] }],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await checkVisionSupport(API_KEY, "openai/gpt-4o");
+    _resetStateForTesting();
+    await checkVisionSupport(API_KEY, "openai/gpt-4o");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 
