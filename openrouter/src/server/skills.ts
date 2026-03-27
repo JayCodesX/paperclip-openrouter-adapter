@@ -1,15 +1,21 @@
-// Skills are not managed by the OpenRouter adapter.
-// Return a "not supported" snapshot so the skills screen renders cleanly.
+// Skills are loaded by orager via the addDirs mechanism.
+// The adapter automatically includes the bundled Paperclip skills directory
+// (get-task, post-comment, list-issues, update-issue-status, etc.) and any
+// extra directories configured via config.addDirs.
+//
+// This means skills ARE supported — they just live on the filesystem rather
+// than being managed through Paperclip's skills sync API.
 
 const SNAPSHOT = {
   adapterType: "openrouter",
-  supported: false,
-  mode: null,
-  desiredSkills: [],
-  entries: [],
+  supported: true,
+  mode: "add-dir",
+  desiredSkills: [] as string[],
+  entries: [] as string[],
   warnings: [
-    "Skills are not managed by the OpenRouter adapter. " +
-      "Install skills directly in your orager/Claude environment.",
+    "Skills are loaded from directories passed to orager via addDirs. " +
+      "The adapter automatically includes the bundled Paperclip skills directory. " +
+      "Add custom skill directories via config.addDirs (array of absolute paths).",
   ],
 };
 
@@ -19,7 +25,16 @@ export async function listOpenRouterSkills(_ctx: unknown): Promise<typeof SNAPSH
 
 export async function syncOpenRouterSkills(
   _ctx: unknown,
-  _desiredSkills: string[],
+  desiredSkills: string[],
 ): Promise<typeof SNAPSHOT> {
-  return SNAPSHOT;
+  // Validate that desired skills are non-empty strings; warn on unresolvable entries.
+  const warnings: string[] = [...SNAPSHOT.warnings];
+  const invalid = desiredSkills.filter((s) => typeof s !== "string" || !s.trim());
+  if (invalid.length > 0) {
+    warnings.push(
+      `${invalid.length} desired skill entr${invalid.length === 1 ? "y" : "ies"} could not be resolved (empty or non-string). ` +
+        "Provide absolute filesystem paths to skill directories.",
+    );
+  }
+  return { ...SNAPSHOT, desiredSkills: desiredSkills.filter((s) => typeof s === "string" && s.trim()), warnings };
 }

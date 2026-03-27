@@ -28,14 +28,17 @@ function parseOragerAssistantEvent(
   const message = asRecord(event.message);
   if (!message) return [{ kind: "stdout", ts, text: rawLine }];
   const content = Array.isArray(message.content) ? message.content : [];
+  // When streaming deltas were already emitted for this turn, skip text/thinking
+  // blocks to avoid duplicating content that was already rendered incrementally.
+  const alreadyStreamed = event.streamed === true;
   const entries: TranscriptEntry[] = [];
   for (const block of content) {
     const b = asRecord(block);
     if (!b) continue;
     if (b.type === "thinking" && typeof b.thinking === "string" && b.thinking) {
-      entries.push({ kind: "thinking", ts, text: b.thinking });
+      if (!alreadyStreamed) entries.push({ kind: "thinking", ts, text: b.thinking });
     } else if (b.type === "text" && typeof b.text === "string" && b.text) {
-      entries.push({ kind: "assistant", ts, text: b.text });
+      if (!alreadyStreamed) entries.push({ kind: "assistant", ts, text: b.text });
     } else if (b.type === "tool_use") {
       entries.push({
         kind: "tool_call",
@@ -51,8 +54,8 @@ function parseOragerAssistantEvent(
       } as TranscriptEntry);
     }
   }
-  // Fall back to stdout when message has no recognized content blocks
-  return entries.length > 0 ? entries : [{ kind: "stdout", ts, text: rawLine }];
+  // Fall back to stdout only when not streamed and nothing was parsed
+  return entries.length > 0 || alreadyStreamed ? entries : [{ kind: "stdout", ts, text: rawLine }];
 }
 
 function parseOragerUserEvent(
@@ -260,6 +263,15 @@ export function parseOpenRouterStdoutLine(
 
   // Orager: other system events — nothing to render
   if (parsed.type === "system") return [];
+
+  // Orager: streaming token deltas — emitted per chunk before the full assistant event
+  if (parsed.type === "text_delta" && typeof parsed.delta === "string" && parsed.delta) {
+    return [{ kind: "assistant", ts, text: parsed.delta }];
+  }
+
+  if (parsed.type === "thinking_delta" && typeof parsed.delta === "string" && parsed.delta) {
+    return [{ kind: "thinking", ts, text: parsed.delta }];
+  }
 
   // Orager: assistant event with content blocks
   if (parsed.type === "assistant") {

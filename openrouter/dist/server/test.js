@@ -58,6 +58,12 @@ function summarizeStatus(checks) {
     return "pass";
 }
 function resolveApiKey(config) {
+    // Support apiKeys[] array (item 6 — API key rotation); first entry is the active key
+    if (Array.isArray(config.apiKeys)) {
+        const first = config.apiKeys.find((k) => typeof k === "string" && k.trim().length > 0);
+        if (first)
+            return first;
+    }
     const fromConfig = asString(config.apiKey, "");
     if (fromConfig)
         return fromConfig;
@@ -86,6 +92,11 @@ async function runOragerProbe(cliPath, cwd, env, timeoutMs = 45_000) {
         const timer = setTimeout(() => {
             timedOut = true;
             proc.kill("SIGTERM");
+            // Force-kill after 3s grace if SIGTERM is ignored
+            setTimeout(() => { try {
+                proc.kill("SIGKILL");
+            }
+            catch { /* already dead */ } }, 3_000);
         }, timeoutMs);
         proc.stdin?.write("Respond with hello.", "utf8");
         proc.stdin?.end();
@@ -313,6 +324,49 @@ export async function testEnvironment(ctx) {
                 message: "Orager hello probe failed.",
                 ...(detail ? { detail: String(detail).replace(/\s+/g, " ").trim().slice(0, 240) } : {}),
                 hint: `Run \`${cliPath} --print - --output-format stream-json --verbose\` manually in ${cwd} and prompt \`Respond with hello\` to debug.`,
+            });
+        }
+    }
+    // ── Daemon health check (when daemonUrl is configured) ───────────────────
+    const daemonUrl = asString(config.daemonUrl, "").replace(/\/$/, "");
+    if (daemonUrl) {
+        try {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 3_000);
+            let healthRes;
+            try {
+                healthRes = await fetch(`${daemonUrl}/health`, { signal: controller.signal });
+            }
+            finally {
+                clearTimeout(timer);
+            }
+            if (healthRes.ok) {
+                const body = await healthRes.json();
+                const isOk = body.status === "ok";
+                checks.push({
+                    code: isOk ? "daemon_health_ok" : "daemon_health_unexpected",
+                    level: isOk ? "info" : "warn",
+                    message: isOk
+                        ? `Daemon at ${daemonUrl} is healthy (${body.activeRuns ?? "?"} / ${body.maxConcurrent ?? "?"} runs active).`
+                        : `Daemon at ${daemonUrl} returned unexpected status: ${JSON.stringify(body).slice(0, 120)}`,
+                });
+            }
+            else {
+                checks.push({
+                    code: "daemon_health_error",
+                    level: "warn",
+                    message: `Daemon at ${daemonUrl} returned HTTP ${healthRes.status}.`,
+                    hint: "Start the daemon with: orager --serve",
+                });
+            }
+        }
+        catch (err) {
+            checks.push({
+                code: "daemon_unreachable",
+                level: "warn",
+                message: `Daemon at ${daemonUrl} is not reachable.`,
+                detail: (err instanceof Error ? err.message : String(err)).slice(0, 200),
+                hint: "Start the daemon with: orager --serve, or remove daemonUrl from config if daemon mode is not intended.",
             });
         }
     }
