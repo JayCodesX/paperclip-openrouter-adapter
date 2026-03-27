@@ -441,7 +441,6 @@ async function executeViaDaemon(
   timeoutSec: number,
   onLog: (stream: "stdout" | "stderr", line: string) => Promise<void> | void,
   maxCostUsdSoft?: number,
-  pendingMemoryOps?: Record<string, unknown>[],
 ): Promise<AdapterExecutionResult | null> {
   const token = mintDaemonJwt(signingKey, agentId);
   const tokenMintedAt = Date.now();
@@ -602,14 +601,6 @@ async function executeViaDaemon(
             toolCallId: string;
             toolName: string;
           };
-        }
-        if (
-          event.type === "tool_result" &&
-          event.tool_name === "remember" &&
-          typeof event.result === "object" &&
-          event.result !== null
-        ) {
-          pendingMemoryOps?.push(event.result as Record<string, unknown>);
         }
       } catch {
         // Non-JSON lines are expected (blank lines, partial chunks) — only warn
@@ -1208,22 +1199,9 @@ export async function executeAgentLoop(
   // Only prepend bootstrap + handoff on the first run
   // (instructions go to --system-prompt-file, not the user message)
   const isFirstRun = !previousSessionId;
-
-  // ── Cross-session memory ───────────────────────────────────────────────────
-  const memoryEnabled = asBoolean(config.memory, true);
-  let memoryStore: import("./memory.js").MemoryStore | null = null;
-  let memoryBlock = "";
-  if (memoryEnabled) {
-    const { loadMemoryStore, pruneExpired, renderMemoryBlock } = await import("./memory.js");
-    memoryStore = pruneExpired(await loadMemoryStore(agent.id));
-    const maxChars = safeNumber(config.memoryMaxChars, 6000);
-    memoryBlock = renderMemoryBlock(memoryStore, maxChars);
-  }
-
   const prompt = joinPromptSections([
     isFirstRun ? renderedBootstrap : null,
     isFirstRun ? sessionHandoff : null,
-    memoryBlock ? `## Your persistent memory\n\n${memoryBlock}\n` : null,
     userMessage,
   ]);
 
@@ -1445,6 +1423,7 @@ export async function executeAgentLoop(
   // Required env vars — pass through so orager also validates (belt-and-suspenders
   // for the spawn path; adapter-level check above handles daemon path).
   if (requiredEnvVars.length > 0) configObj.requiredEnvVars = requiredEnvVars;
+  configObj.memoryKey = agent.id;
 
   // Response format (JSON healing)
   const responseFormat = parseObject(config.responseFormat);
@@ -1604,9 +1583,6 @@ export async function executeAgentLoop(
   const runStartMs = Date.now();
   structuredLog({ level: "info", ts: runStartMs, event: "run_start", agentId: agent.id, runId, model: effectiveModel });
 
-  // Shared across daemon and spawn paths — filled during streaming, flushed after run
-  const pendingMemoryOps: Record<string, unknown>[] = [];
-
   // ── Daemon fast-path ────────────────────────────────────────────────────────
   // If ORAGER_DAEMON_URL (or config.daemonUrl) is set, attempt to route this
   // run through the persistent orager daemon instead of spawning a subprocess.
@@ -1740,6 +1716,7 @@ export async function executeAgentLoop(
         timeoutSec,
         ...(apiKeyPool.length > 1 ? { apiKeys: apiKeyPool } : {}),
         ...(requiredEnvVars.length > 0 ? { requiredEnvVars } : {}),
+        memoryKey: agent.id,
       };
 
       const daemonResult = await executeViaDaemon(
@@ -1752,7 +1729,6 @@ export async function executeAgentLoop(
         timeoutSec,
         onLog,
         maxCostUsdSoft,
-        pendingMemoryOps,
       );
       if (daemonResult !== null) {
         structuredLog({
@@ -1789,16 +1765,6 @@ export async function executeAgentLoop(
         if (typeof daemonResult.costUsd === "number") {
           recordRunCost(daemonResult.costUsd);
           checkCostAnomaly(daemonResult.costUsd, agent.id, runId, onLog);
-        }
-        // Flush pending memory writes (non-fatal)
-        if (memoryEnabled && memoryStore && pendingMemoryOps.length > 0) {
-          const { applySkillResult, saveMemoryStore } = await import("./memory.js");
-          let updatedStore = memoryStore;
-          for (const op of pendingMemoryOps) {
-            const { store } = applySkillResult(updatedStore, op, runId);
-            updatedStore = store;
-          }
-          await saveMemoryStore(agent.id, updatedStore).catch(() => {});
         }
         return daemonResult;
       }
@@ -1966,14 +1932,6 @@ export async function executeAgentLoop(
               toolCallId: string;
               toolName: string;
             };
-          }
-          if (
-            event.type === "tool_result" &&
-            event.tool_name === "remember" &&
-            typeof event.result === "object" &&
-            event.result !== null
-          ) {
-            pendingMemoryOps.push(event.result as Record<string, unknown>);
           }
         } catch {
           // non-JSON lines are fine — tool output, bash stdout, etc.
@@ -2160,18 +2118,6 @@ export async function executeAgentLoop(
       // Cost anomaly detection
       recordRunCost(spawnResult.costUsd ?? 0);
       checkCostAnomaly(spawnResult.costUsd ?? 0, agent.id, runId, onLog);
-      // Flush pending memory writes (fire-and-forget, non-fatal)
-      if (memoryEnabled && memoryStore && pendingMemoryOps.length > 0) {
-        (async () => {
-          const { applySkillResult, saveMemoryStore } = await import("./memory.js");
-          let updatedStore = memoryStore!;
-          for (const op of pendingMemoryOps) {
-            const { store } = applySkillResult(updatedStore, op, runId);
-            updatedStore = store;
-          }
-          await saveMemoryStore(agent.id, updatedStore);
-        })().catch(() => {});
-      }
       resolve(spawnResult);
     });
 
