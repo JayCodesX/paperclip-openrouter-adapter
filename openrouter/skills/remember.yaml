@@ -1,0 +1,32 @@
+name: remember
+description: |
+  Read and write your persistent memory — facts that survive session resets and
+  carry forward into future runs. Use this proactively when you learn something
+  worth remembering (user preferences, codebase quirks, recurring bugs, etc.)
+  and when starting a new task to recall prior context.
+parameters:
+  type: object
+  properties:
+    action:
+      type: string
+      enum: [add, remove, list]
+      description: "add: store a new memory. remove: delete by id. list: show all current memories."
+    content:
+      type: string
+      description: "Required for action=add. Concise natural language fact (max 500 chars)."
+    tags:
+      type: array
+      items:
+        type: string
+      description: "Optional category tags for action=add (e.g. ['auth', 'user-pref'])."
+    ttlDays:
+      type: number
+      description: "Optional TTL in days for action=add. Omit for permanent storage."
+    importance:
+      type: number
+      enum: [1, 2, 3]
+      description: "1=low, 2=normal, 3=high. Affects sort order and eviction. Default 2."
+    id:
+      type: string
+      description: "Required for action=remove. The memory entry id."
+  required: [action]
