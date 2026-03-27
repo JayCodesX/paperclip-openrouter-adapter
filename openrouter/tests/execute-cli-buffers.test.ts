@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
-// We'll test the stream buffer behavior indirectly through parse-stdout.ts
-// since the buffer logic lives inside execute-cli.ts's closures.
-// Focus on what parse-stdout.ts does with the output that buffer handling produces.
+// Tests for parseOpenRouterStdoutLine edge cases: malformed/partial JSON,
+// empty lines, and oversized-line recovery. The execute-cli.ts stream buffer
+// logic that *calls* parseOpenRouterStdoutLine lives inside closures and is
+// covered by the integration tests in tests/integration/full-pipeline.test.ts.
 import { parseOpenRouterStdoutLine } from "../src/ui/parse-stdout.js";
 
 const TS = "2026-01-01T00:00:00.000Z";

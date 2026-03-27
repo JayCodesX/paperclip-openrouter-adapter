@@ -18,7 +18,8 @@
     "build": "tsc",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "check-dist": "npm run build && git diff --exit-code dist/ || (echo 'ERROR: dist/ is stale — run npm run build and commit the result' && exit 1)"
   },
   "dependencies": {
     "@paperclipai/adapter-utils": "latest",

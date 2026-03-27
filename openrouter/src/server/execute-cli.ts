@@ -157,6 +157,12 @@ function buildApiKeyPool(config: Record<string, unknown>): { primary: string; po
   return { primary, pool };
 }
 
+// Emitted by orager to stderr when a requested session isn't found on disk.
+// We detect this string to clear the stale session ID on the Paperclip side.
+// Exported so tests can assert on the exact marker without magic strings.
+// Source: ~/Projects/orager/src/loop.ts — search for "starting fresh"
+export const SESSION_NOT_FOUND_MARKER = "not found, starting fresh";
+
 // ── Daemon circuit breaker (per daemon URL) ────────────────────────────────
 // Tracks consecutive daemon failures per daemon URL. After DAEMON_CB_THRESHOLD
 // consecutive failures, that daemon is bypassed for DAEMON_CB_RESET_MS ms.
@@ -208,6 +214,17 @@ async function readDaemonSigningKey(
     ]);
     const trimmed = key.trim();
     if (!trimmed) return null;
+
+    // Warn if the key file is readable by group or world — anyone on the system
+    // with that access could forge daemon JWTs and execute arbitrary agent runs.
+    if (stat.mode & 0o077) {
+      const modeOctal = (stat.mode & 0o777).toString(8).padStart(3, "0");
+      const msg =
+        `[openrouter adapter] WARNING: daemon signing key at ${DAEMON_KEY_PATH} has unsafe permissions (${modeOctal}). ` +
+        `Run: chmod 600 ${DAEMON_KEY_PATH}`;
+      if (onLog) void onLog("stderr", msg + "\n");
+      structuredLog({ level: "warn", ts: Date.now(), event: "daemon_key_unsafe_permissions", keyPath: DAEMON_KEY_PATH, mode: modeOctal });
+    }
 
     const ageMs = Date.now() - stat.mtimeMs;
     if (ageMs > DAEMON_KEY_MAX_AGE_MS && onLog && !_daemonKeyAgeWarningEmitted) {
@@ -570,18 +587,25 @@ async function executeViaDaemon(
         void onLog("stderr",
           `[openrouter adapter] WARNING: oversized stream segment (~${discarded.length} bytes) may contain a result/question event — attempting to parse\n`
         );
+        structuredLog({ level: "warn", ts: Date.now(), event: "daemon_oversized_segment_critical", agentId, segmentBytes: discarded.length, message: "Oversized segment contains result/question event — attempting recovery" });
         // Try to extract and process the critical event from the oversized line
         const criticalMatch = discarded.match(/\{"type":"(?:result|question)"[^\n]*/);
         if (criticalMatch) {
           try {
             const event = JSON.parse(criticalMatch[0]) as Record<string, unknown>;
             if (event.type === "result") resultEvent = event;
-          } catch { /* best effort */ }
+          } catch {
+            // Parse failed — the result event is unrecoverable. Log so operators
+            // know the run will end with a synthesised error rather than silently.
+            structuredLog({ level: "error", ts: Date.now(), event: "daemon_oversized_segment_unrecoverable", agentId, segmentBytes: discarded.length, message: "Could not parse result event from oversized segment — run will end with synthesised error" });
+            void onLog("stderr", `[openrouter adapter] ERROR: could not parse result event from oversized segment (${discarded.length} bytes) — run result lost\n`);
+          }
         }
       } else {
         void onLog("stderr",
           `[openrouter adapter] daemon stream segment exceeded ${MAX_STREAM_BUFFER_BYTES} bytes — discarding oversized segment\n`
         );
+        structuredLog({ level: "warn", ts: Date.now(), event: "daemon_oversized_segment_discarded", agentId, segmentBytes: discarded.length });
       }
       // Skip forward to the next newline to resync the parser
       buffer = nextNewline >= 0 ? buffer.slice(nextNewline + 1) : "";
@@ -712,7 +736,7 @@ async function executeViaDaemon(
 }
 
 const DEFAULT_CLI = "orager";
-const DEFAULT_MODEL = "deepseek/deepseek-chat-v3-2";
+const DEFAULT_MODEL = "deepseek/deepseek-chat-v3-0324";
 const DEFAULT_MAX_TURNS = 20;
 const DEFAULT_MAX_RETRIES = 3;
 // Ordered fallback chain tried when the configured model doesn't support vision.
@@ -1834,6 +1858,17 @@ export async function executeAgentLoop(
   }
 
   // ── Spawn orager ───────────────────────────────────────────────────────────
+  // detached: true — puts orager in its own process group so that on timeout
+  // we can send SIGTERM/SIGKILL to the entire group (orager + any subprocesses
+  // it spawned, e.g. bash commands) via process.kill(-(proc.pid!), signal).
+  // Without detached the kill would only reach orager itself, leaving bash
+  // children as orphans.
+  //
+  // proc.unref() — allows the Node.js event loop to exit even if orager is still
+  // running. This is intentional: if Paperclip restarts or the adapter process
+  // is killed while a run is in flight, the orphaned orager will continue until
+  // its own timeout fires. The alternative (keeping Node alive) is worse for
+  // Paperclip availability. The timeout + grace SIGKILL is the cleanup path.
   return new Promise<AdapterExecutionResult>((resolve) => {
     let proc: ReturnType<typeof spawn>;
     try {
@@ -1955,7 +1990,10 @@ export async function executeAgentLoop(
       // found. Detect this so we can clear the stale session ID on Paperclip's
       // side, ensuring the next run is treated as a fresh start (with
       // instructions re-injected via --system-prompt-file).
-      if (text.includes("not found, starting fresh")) sessionLost = true;
+      if (text.includes(SESSION_NOT_FOUND_MARKER)) {
+        sessionLost = true;
+        structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId: agent.id, runId, sessionId: previousSessionId ?? undefined });
+      }
       void onLog("stderr", text);
     });
 
@@ -2071,6 +2109,7 @@ export async function executeAgentLoop(
         errorMessage: softStop
           ? undefined
           : `Agent loop ended: ${subtype}${resultText ? ` — ${resultText}` : ""}`,
+        errorCode: softStop ? undefined : subtype,
         clearSession,
         model: resolvedModel || undefined,
         usage: usageRaw
@@ -2103,6 +2142,7 @@ export async function executeAgentLoop(
           totalCostUsd,
           cacheHitRatio: Math.round(cacheHitRatio * 100) / 100,
           turnCount: typeof resultEvent?.turnCount === "number" ? resultEvent.turnCount : undefined,
+          filesChanged: Array.isArray(resultEvent?.filesChanged) ? resultEvent.filesChanged as string[] : undefined,
         },
         question: questionEvent
           ? { prompt: questionEvent.prompt, choices: questionEvent.choices }
@@ -2149,6 +2189,19 @@ export async function executeAgentLoop(
 export function _resetStateForTesting(): void {
   _costWindow.length = 0;
   _visionCache.clear();
+  _daemonCircuitState.clear();
   _resetModelCacheForTesting();
 }
-export { buildApiKeyPool, recordRunCost, checkCostAnomaly };
+export {
+  buildApiKeyPool,
+  recordRunCost,
+  checkCostAnomaly,
+  DEFAULT_MODEL,
+  DAEMON_KEY_PATH,
+  DAEMON_KEY_MAX_AGE_MS,
+  isDaemonCircuitOpen,
+  recordDaemonFailure,
+  recordDaemonSuccess,
+  DAEMON_CB_THRESHOLD,
+  DAEMON_CB_RESET_MS,
+};
