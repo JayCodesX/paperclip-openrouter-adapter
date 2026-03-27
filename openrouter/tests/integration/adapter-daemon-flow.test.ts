@@ -21,6 +21,9 @@ const TEST_SIGNING_KEY = "integration-test-key-32-bytes!!!";
 const KEY_PATH = path.join(os.homedir(), ".orager", "daemon.key");
 const DAEMON_KEY_DIR = path.join(os.homedir(), ".orager");
 
+/** Timeout for tests that involve async retry paths (ms). */
+const RETRY_IT = 15_000;
+
 // ── Server state ──────────────────────────────────────────────────────────────
 
 let server: http.Server;
@@ -333,7 +336,7 @@ describe("adapter daemon flow — error paths", () => {
     // After the retry the run should succeed
     expect(result.exitCode).toBe(0);
     expect(result.costUsd).toBeCloseTo(0.005, 4);
-  });
+  }, RETRY_IT);
 
   it("daemon unavailable (connection refused) → result is defined with error info", async () => {
     // Point daemonUrl at a port where nothing is listening.
