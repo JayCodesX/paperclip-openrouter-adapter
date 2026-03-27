@@ -159,6 +159,22 @@ describe("checkVisionSupport", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it("uses OPENROUTER_BASE_URL env var when set", async () => {
+    process.env.OPENROUTER_BASE_URL = "https://mock-or.example.com/api/v1";
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [{ id: "openai/gpt-4o", input_modalities: ["text", "image"] }],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await checkVisionSupport(API_KEY, "openai/gpt-4o");
+
+    expect((fetchMock.mock.calls[0] as unknown[])[0]).toContain("mock-or.example.com");
+    delete process.env.OPENROUTER_BASE_URL;
+  });
 });
 
 // ── cost anomaly detection ─────────────────────────────────────────────────────
