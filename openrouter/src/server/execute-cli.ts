@@ -1061,7 +1061,7 @@ export async function executeAgentLoop(
   const sandboxRoot = asString(config.sandboxRoot, "");
   const useFinishTool = asBoolean(config.useFinishTool, false);
   const profile = asString(config.profile, "").trim();
-  const settingsFile = asString(config.settingsFile, "").trim();
+  const _rawSettingsFile = asString(config.settingsFile, "").trim(); // validated after cwd is resolved
   const forceResume = asBoolean(config.forceResume, false);
   const daemonAutoStart = asBoolean(config.daemonAutoStart, false);
 
@@ -1422,6 +1422,34 @@ export async function executeAgentLoop(
   } catch {
     // Non-fatal — spawn will fail with a clearer error if cwd is truly invalid
   }
+
+  // ── settingsFile validation ───────────────────────────────────────────────
+  // Relative paths must resolve within cwd (symlink-safe). Absolute paths are
+  // operator-trusted (e.g. ~/.orager/custom.json). Null bytes are always rejected.
+  // On the daemon path settingsFile is stripped by sanitizeDaemonRunOpts anyway.
+  const settingsFile = await (async () => {
+    const raw = _rawSettingsFile;
+    if (!raw) return "";
+    if (raw.includes("\x00")) {
+      void onLog("stderr", `[openrouter adapter] WARNING: settingsFile contains null bytes — ignoring\n`);
+      return "";
+    }
+    if (path.isAbsolute(raw)) return raw; // absolute paths: operator trust
+    const abs = path.resolve(cwd, raw);
+    let real: string;
+    try {
+      real = await fs.realpath(abs);
+    } catch {
+      real = abs; // file may not exist yet; fall back to lexical path
+    }
+    let realCwd = cwd;
+    try { realCwd = await fs.realpath(cwd); } catch { /* fallback */ }
+    if (!real.startsWith(realCwd + path.sep) && real !== realCwd) {
+      void onLog("stderr", `[openrouter adapter] WARNING: settingsFile '${raw}' resolves outside cwd — ignoring\n`);
+      return "";
+    }
+    return real;
+  })();
 
   const taskId =
     (typeof context.taskId === "string" && context.taskId.trim()) ||
