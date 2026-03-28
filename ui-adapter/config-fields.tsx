@@ -164,6 +164,8 @@ export function OpenRouterConfigFields({
     commitTurnModelRules(turnModelRules.filter((_, i) => i !== idx));
   };
 
+  const visionModels = models.filter((m) => m.supportsVision);
+
   return (
     <>
       {/* ===== CORE ===== */}
@@ -225,6 +227,96 @@ export function OpenRouterConfigFields({
             immediate
             className={inputClass}
             placeholder="deepseek/deepseek-chat-v3-0324"
+          />
+        )}
+      </Field>
+
+      <Field
+        label="Fallback Model"
+        hint="Used when the primary model fails (e.g. rate limit)."
+      >
+        {models.length > 0 ? (
+          <select
+            aria-label="Fallback Model"
+            className={selectClass}
+            value={
+              isCreate
+                ? (values!.fallbackModel as string) ?? ""
+                : eff("adapterConfig", "fallbackModel", String(config.fallbackModel ?? ""))
+            }
+            onChange={(e) =>
+              isCreate
+                ? set!({ fallbackModel: e.target.value || undefined })
+                : mark("adapterConfig", "fallbackModel", e.target.value || undefined)
+            }
+          >
+            <option value="">None (use primary only)</option>
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <DraftInput
+            value={
+              isCreate
+                ? (values!.fallbackModel as string) ?? ""
+                : eff("adapterConfig", "fallbackModel", String(config.fallbackModel ?? ""))
+            }
+            onCommit={(v) =>
+              isCreate
+                ? set!({ fallbackModel: v || undefined })
+                : mark("adapterConfig", "fallbackModel", v || undefined)
+            }
+            immediate
+            className={inputClass}
+            placeholder="model-id (optional)"
+          />
+        )}
+      </Field>
+
+      <Field
+        label="Vision Model"
+        hint="Overrides the primary model when the task contains images."
+      >
+        {visionModels.length > 0 ? (
+          <select
+            aria-label="Vision Model"
+            className={selectClass}
+            value={
+              isCreate
+                ? (values!.visionModel as string) ?? ""
+                : eff("adapterConfig", "visionModel", String(config.visionModel ?? ""))
+            }
+            onChange={(e) =>
+              isCreate
+                ? set!({ visionModel: e.target.value || undefined })
+                : mark("adapterConfig", "visionModel", e.target.value || undefined)
+            }
+          >
+            <option value="">None (auto-select)</option>
+            {visionModels.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <DraftInput
+            value={
+              isCreate
+                ? (values!.visionModel as string) ?? ""
+                : eff("adapterConfig", "visionModel", String(config.visionModel ?? ""))
+            }
+            onCommit={(v) =>
+              isCreate
+                ? set!({ visionModel: v || undefined })
+                : mark("adapterConfig", "visionModel", v || undefined)
+            }
+            immediate
+            className={inputClass}
+            placeholder="model-id (optional)"
           />
         )}
       </Field>

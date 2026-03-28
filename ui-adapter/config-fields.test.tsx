@@ -343,6 +343,74 @@ describe("OpenRouterConfigFields", () => {
     expect(screen.getByDisplayValue("http://127.0.0.1:9999")).toBeDefined();
   });
 
+  // 13. fallbackModel — dropdown shows all models
+  it("fallbackModel: dropdown includes all models (regardless of supportsVision)", () => {
+    const modelList = [
+      { id: "openai/gpt-4o", label: "GPT-4o", supportsVision: true },
+      { id: "deepseek/deepseek-r1", label: "DeepSeek R1", supportsVision: false },
+    ];
+    render(<OpenRouterConfigFields {...makeProps({ models: modelList })} />);
+
+    const select = screen.getByRole("combobox", { name: /fallback model/i });
+    const options = Array.from(select.querySelectorAll("option")).map((o) => o.value);
+
+    expect(options).toContain("openai/gpt-4o");
+    expect(options).toContain("deepseek/deepseek-r1");
+  });
+
+  // 14. visionModel — dropdown only shows supportsVision models
+  it("visionModel: dropdown excludes models where supportsVision is false", () => {
+    const modelList = [
+      { id: "openai/gpt-4o", label: "GPT-4o", supportsVision: true },
+      { id: "deepseek/deepseek-r1", label: "DeepSeek R1", supportsVision: false },
+      { id: "google/gemini-flash", label: "Gemini Flash", supportsVision: true },
+    ];
+    render(<OpenRouterConfigFields {...makeProps({ models: modelList })} />);
+
+    const select = screen.getByRole("combobox", { name: /vision model/i });
+    const options = Array.from(select.querySelectorAll("option")).map((o) => o.value);
+
+    expect(options).toContain("openai/gpt-4o");
+    expect(options).toContain("google/gemini-flash");
+    expect(options).not.toContain("deepseek/deepseek-r1");
+  });
+
+  // 15. Both fields are optional — no error when values absent, onChange calls set correctly
+  it("fallbackModel and visionModel are optional — absent values render without error", () => {
+    // Empty values (no fallbackModel or visionModel set) — should not throw
+    expect(() =>
+      render(<OpenRouterConfigFields {...makeProps({ values: {} })} />),
+    ).not.toThrow();
+  });
+
+  it("fallbackModel onChange calls set with selected model id", () => {
+    const set = vi.fn();
+    const modelList = [
+      { id: "openai/gpt-4o", label: "GPT-4o", supportsVision: true },
+      { id: "deepseek/deepseek-r1", label: "DeepSeek R1", supportsVision: false },
+    ];
+    render(<OpenRouterConfigFields {...makeProps({ set, models: modelList })} />);
+
+    const select = screen.getByRole("combobox", { name: /fallback model/i });
+    fireEvent.change(select, { target: { value: "openai/gpt-4o" } });
+
+    expect(set).toHaveBeenCalledWith({ fallbackModel: "openai/gpt-4o" });
+  });
+
+  it("visionModel onChange calls set with selected model id", () => {
+    const set = vi.fn();
+    const modelList = [
+      { id: "openai/gpt-4o", label: "GPT-4o", supportsVision: true },
+      { id: "google/gemini-flash", label: "Gemini Flash", supportsVision: true },
+    ];
+    render(<OpenRouterConfigFields {...makeProps({ set, models: modelList })} />);
+
+    const select = screen.getByRole("combobox", { name: /vision model/i });
+    fireEvent.change(select, { target: { value: "google/gemini-flash" } });
+
+    expect(set).toHaveBeenCalledWith({ visionModel: "google/gemini-flash" });
+  });
+
   // 12. Collapsible sections start closed
   it("collapsible sections (Sampling, Reasoning, Provider routing) start closed", () => {
     const { container } = render(<OpenRouterConfigFields {...makeProps()} />);
