@@ -354,4 +354,101 @@ describe("OpenRouterConfigFields", () => {
       expect(el.hasAttribute("open")).toBe(false);
     });
   });
+
+  // 13. fallbackModel dropdown — includes all models
+  it("fallbackModel dropdown: includes all models regardless of supportsVision", () => {
+    const allModels = [
+      { id: "vision/model", label: "Vision Model", supportsVision: true },
+      { id: "text/model", label: "Text Only Model", supportsVision: false },
+      { id: "unknown/model", label: "Unknown Model" },
+    ];
+    render(<OpenRouterConfigFields {...makeProps({ models: allModels })} />);
+
+    const fallbackSelect = screen.getByRole("combobox", { name: /fallback model/i });
+    const options = Array.from(fallbackSelect.querySelectorAll("option")).map(
+      (o) => o.value,
+    );
+
+    expect(options).toContain("vision/model");
+    expect(options).toContain("text/model");
+    expect(options).toContain("unknown/model");
+  });
+
+  // 14. visionModel dropdown — excludes models with supportsVision: false
+  it("visionModel dropdown: excludes models where supportsVision is false", () => {
+    const allModels = [
+      { id: "vision/model", label: "Vision Model", supportsVision: true },
+      { id: "text/model", label: "Text Only Model", supportsVision: false },
+    ];
+    render(<OpenRouterConfigFields {...makeProps({ models: allModels })} />);
+
+    const visionSelect = screen.getByRole("combobox", { name: /vision model/i });
+    const options = Array.from(visionSelect.querySelectorAll("option")).map(
+      (o) => o.value,
+    );
+
+    expect(options).toContain("vision/model");
+    expect(options).not.toContain("text/model");
+  });
+
+  // 15. visionModel dropdown — includes models where supportsVision is true or undefined
+  it("visionModel dropdown: includes models where supportsVision is true or absent", () => {
+    const allModels = [
+      { id: "vision/model", label: "Vision Model", supportsVision: true },
+      { id: "unknown/model", label: "Unknown Model" },
+    ];
+    render(<OpenRouterConfigFields {...makeProps({ models: allModels })} />);
+
+    const visionSelect = screen.getByRole("combobox", { name: /vision model/i });
+    const options = Array.from(visionSelect.querySelectorAll("option")).map(
+      (o) => o.value,
+    );
+
+    expect(options).toContain("vision/model");
+    expect(options).toContain("unknown/model");
+  });
+
+  // 16. fallbackModel is optional — no error when not set
+  it("fallbackModel: renders without error when not set in values", () => {
+    // Should render without throwing
+    render(<OpenRouterConfigFields {...makeProps({ values: {} })} />);
+    const fallbackSelect = screen.getByRole("combobox", { name: /fallback model/i });
+    expect((fallbackSelect as HTMLSelectElement).value).toBe("");
+  });
+
+  // 17. visionModel is optional — no error when not set
+  it("visionModel: renders without error when not set in values", () => {
+    // Should render without throwing
+    render(<OpenRouterConfigFields {...makeProps({ values: {} })} />);
+    const visionSelect = screen.getByRole("combobox", { name: /vision model/i });
+    expect((visionSelect as HTMLSelectElement).value).toBe("");
+  });
+
+  // 18. fallbackModel change calls set with correct value
+  it("fallbackModel: changing value calls set with correct model id", () => {
+    const set = vi.fn();
+    const allModels = [{ id: "openai/gpt-4o", label: "GPT-4o", supportsVision: true }];
+    render(<OpenRouterConfigFields {...makeProps({ set, models: allModels })} />);
+
+    const fallbackSelect = screen.getByRole("combobox", { name: /fallback model/i });
+    fireEvent.change(fallbackSelect, { target: { value: "openai/gpt-4o" } });
+
+    expect(set).toHaveBeenCalledWith(
+      expect.objectContaining({ fallbackModel: "openai/gpt-4o" }),
+    );
+  });
+
+  // 19. visionModel change calls set with correct value
+  it("visionModel: changing value calls set with correct model id", () => {
+    const set = vi.fn();
+    const allModels = [{ id: "openai/gpt-4o", label: "GPT-4o", supportsVision: true }];
+    render(<OpenRouterConfigFields {...makeProps({ set, models: allModels })} />);
+
+    const visionSelect = screen.getByRole("combobox", { name: /vision model/i });
+    fireEvent.change(visionSelect, { target: { value: "openai/gpt-4o" } });
+
+    expect(set).toHaveBeenCalledWith(
+      expect.objectContaining({ visionModel: "openai/gpt-4o" }),
+    );
+  });
 });
