@@ -661,6 +661,7 @@ interface DaemonRunOpts {
   memoryKey?: string;
   memoryRetrieval?: string;
   memoryEmbeddingModel?: string;
+  memoryMaxChars?: number;
 }
 
 /**
@@ -1972,6 +1973,8 @@ export async function executeAgentLoop(
     const embModel = asString(config.memoryEmbeddingModel, "");
     if (embModel) configObj.memoryEmbeddingModel = embModel;
   }
+  const memoryMaxChars = asNumber(config.memoryMaxChars, 0);
+  if (memoryMaxChars > 0) configObj.memoryMaxChars = memoryMaxChars;
 
   // Response format (JSON healing)
   const responseFormat = parseObject(config.responseFormat);
@@ -2326,6 +2329,7 @@ export async function executeAgentLoop(
               ...(asString(config.memoryEmbeddingModel, "") ? { memoryEmbeddingModel: asString(config.memoryEmbeddingModel, "") } : {}),
             }
           : {}),
+        ...(asNumber(config.memoryMaxChars, 0) > 0 ? { memoryMaxChars: asNumber(config.memoryMaxChars, 0) } : {}),
       };
 
       const daemonResult = await executeViaDaemon(

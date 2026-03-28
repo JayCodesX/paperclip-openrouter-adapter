@@ -318,6 +318,13 @@ export function buildOpenRouterConfig(
       ac.memoryEmbeddingModel = vc.memoryEmbeddingModel.trim();
     }
   }
+  if (typeof vc.memoryMaxChars === "number" && vc.memoryMaxChars > 0) ac.memoryMaxChars = vc.memoryMaxChars;
+
+  // ── Agent loop ─────────────────────────────────────────────────────────────
+  if (typeof vc.maxIdenticalToolCallTurns === "number" && vc.maxIdenticalToolCallTurns > 0) ac.maxIdenticalToolCallTurns = vc.maxIdenticalToolCallTurns;
+
+  // ── Approval mode ──────────────────────────────────────────────────────────
+  if (vc.approvalMode === "question" || vc.approvalMode === "auto") ac.approvalMode = vc.approvalMode;
 
   return ac;
 }

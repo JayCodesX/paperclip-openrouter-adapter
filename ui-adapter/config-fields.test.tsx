@@ -456,4 +456,55 @@ describe("OpenRouterConfigFields", () => {
 
     expect(set).toHaveBeenCalledWith({ memoryEmbeddingModel: "openai/text-embedding-3-small" });
   });
+
+  // 16. memoryMaxChars input renders and onChange fires set() correctly
+  it("memoryMaxChars: input renders and onChange fires set() correctly", () => {
+    const set = vi.fn();
+    render(<OpenRouterConfigFields {...makeProps({ set })} />);
+
+    const label = screen.getByText("Memory Max Chars");
+    expect(label).toBeDefined();
+
+    // Find the number input associated with this field by querying all number inputs
+    // and firing change on the one near Memory Max Chars
+    const allNumberInputs = screen.getAllByRole("spinbutton");
+    // Find the memoryMaxChars input — it should have value "0" (default)
+    // We find by proximity to the "Memory Max Chars" label
+    const fieldContainer = label.closest("div")!;
+    const input = fieldContainer.querySelector('input[type="number"]')!;
+    fireEvent.change(input, { target: { value: "4000" } });
+
+    expect(set).toHaveBeenCalledWith({ memoryMaxChars: 4000 });
+  });
+
+  // 17. maxIdenticalToolCallTurns input renders and onChange fires set() correctly
+  it("maxIdenticalToolCallTurns: input renders and onChange fires set() correctly", () => {
+    const set = vi.fn();
+    render(<OpenRouterConfigFields {...makeProps({ set })} />);
+
+    const label = screen.getByText("Max Identical Tool Call Turns");
+    expect(label).toBeDefined();
+
+    const fieldContainer = label.closest("div")!;
+    const input = fieldContainer.querySelector('input[type="number"]')!;
+    fireEvent.change(input, { target: { value: "5" } });
+
+    expect(set).toHaveBeenCalledWith({ maxIdenticalToolCallTurns: 5 });
+  });
+
+  // 18. approvalMode select has "question" and "auto" options and onChange fires set()
+  it("approvalMode: select has 'question' and 'auto' options and onChange fires set()", () => {
+    const set = vi.fn();
+    render(<OpenRouterConfigFields {...makeProps({ set })} />);
+
+    const select = screen.getByRole("combobox", { name: /approval mode/i });
+    expect(select).toBeDefined();
+
+    const options = Array.from(select.querySelectorAll("option")).map((o) => o.value);
+    expect(options).toContain("question");
+    expect(options).toContain("auto");
+
+    fireEvent.change(select, { target: { value: "question" } });
+    expect(set).toHaveBeenCalledWith({ approvalMode: "question" });
+  });
 });

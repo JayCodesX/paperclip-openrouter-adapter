@@ -629,6 +629,54 @@ export function OpenRouterConfigFields({
       </Field>
 
       <Field
+        label="Max Identical Tool Call Turns"
+        hint="Turns with identical tool call signature before injecting an anti-loop prompt. Default: 3."
+      >
+        <DraftNumberInput
+          value={
+            isCreate
+              ? Number(values!.maxIdenticalToolCallTurns ?? 0)
+              : eff(
+                  "adapterConfig",
+                  "maxIdenticalToolCallTurns",
+                  Number(config.maxIdenticalToolCallTurns ?? 0),
+                )
+          }
+          onCommit={(v) =>
+            isCreate
+              ? set!({ maxIdenticalToolCallTurns: v > 0 ? v : undefined })
+              : mark("adapterConfig", "maxIdenticalToolCallTurns", v > 0 ? v : undefined)
+          }
+          immediate
+          className={inputClass}
+        />
+      </Field>
+
+      <Field
+        label="Approval Mode"
+        hint="Controls tool approval. 'question' pauses for user input; 'auto' approves all."
+      >
+        <select
+          aria-label="Approval Mode"
+          className={selectClass}
+          value={
+            isCreate
+              ? (values!.approvalMode as string) ?? ""
+              : eff("adapterConfig", "approvalMode", String(config.approvalMode ?? ""))
+          }
+          onChange={(e) =>
+            isCreate
+              ? set!({ approvalMode: e.target.value || undefined })
+              : mark("adapterConfig", "approvalMode", e.target.value || undefined)
+          }
+        >
+          <option value="">Default</option>
+          <option value="question">question</option>
+          <option value="auto">auto</option>
+        </select>
+      </Field>
+
+      <Field
         label="Max cost (USD)"
         hint="Hard stop. Abort the run if accumulated cost exceeds this USD amount."
       >
@@ -1388,6 +1436,30 @@ export function OpenRouterConfigFields({
           immediate
           className={inputClass}
           placeholder="openai/text-embedding-3-small"
+        />
+      </Field>
+
+      <Field
+        label="Memory Max Chars"
+        hint="Maximum characters of memory injected into the system prompt. Default: 6000."
+      >
+        <DraftNumberInput
+          value={
+            isCreate
+              ? Number(values!.memoryMaxChars ?? 0)
+              : eff(
+                  "adapterConfig",
+                  "memoryMaxChars",
+                  Number(config.memoryMaxChars ?? 0),
+                )
+          }
+          onCommit={(v) =>
+            isCreate
+              ? set!({ memoryMaxChars: v > 0 ? v : undefined })
+              : mark("adapterConfig", "memoryMaxChars", v > 0 ? v : undefined)
+          }
+          immediate
+          className={inputClass}
         />
       </Field>
 
