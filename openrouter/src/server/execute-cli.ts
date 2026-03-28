@@ -91,6 +91,37 @@ function checkCostAnomaly(
   }
 }
 
+// ── Memory key ────────────────────────────────────────────────────────────────
+// Computes the key used to namespace orager's memory store.  When a workspace
+// repo URL is available the key includes a filesystem-safe slug derived from
+// the URL so that separate repos don't share memory.
+
+/** Convert a repo URL into a short filesystem-safe slug. */
+function repoSlug(repoUrl: string): string {
+  // Strip scheme (e.g. "https://") then replace non-alphanumeric characters
+  // with underscores, collapse repeated underscores, trim leading/trailing
+  // underscores and truncate to 64 characters.
+  return repoUrl
+    .replace(/^[a-zA-Z][a-zA-Z0-9+\-.]*:\/\//, "")  // strip scheme://
+    .replace(/[^a-zA-Z0-9_]/g, "_")                  // non-safe chars → _
+    .replace(/_+/g, "_")                              // collapse repeats
+    .replace(/^_+|_+$/g, "")                          // trim edges
+    .slice(0, 64);
+}
+
+/**
+ * Build the memory key for orager.
+ *
+ * - Falls back to `agentId` alone when `repoUrl` is null or empty.
+ * - Otherwise returns `${agentId}_${repoSlug(repoUrl)}` truncated to 128 chars.
+ */
+export function buildMemoryKey(agentId: string, repoUrl: string | null): string {
+  if (!repoUrl) return agentId;
+  const slug = repoSlug(repoUrl);
+  if (!slug) return agentId;
+  return `${agentId}_${slug}`.slice(0, 128);
+}
+
 // ── Vision support check ──────────────────────────────────────────────────────
 // Fetches OpenRouter /api/v1/models to verify the selected model reports
 // "image" in its input_modalities before sending image_url content blocks.
@@ -1931,7 +1962,7 @@ export async function executeAgentLoop(
   // Required env vars — pass through so orager also validates (belt-and-suspenders
   // for the spawn path; adapter-level check above handles daemon path).
   if (requiredEnvVars.length > 0) configObj.requiredEnvVars = requiredEnvVars;
-  configObj.memoryKey = agent.id;
+  configObj.memoryKey = buildMemoryKey(agent.id, workspaceRepoUrl);
 
   // Response format (JSON healing)
   const responseFormat = parseObject(config.responseFormat);
@@ -2279,7 +2310,7 @@ export async function executeAgentLoop(
         timeoutSec,
         ...(apiKeyPool.length > 1 ? { apiKeys: apiKeyPool } : {}),
         ...(requiredEnvVars.length > 0 ? { requiredEnvVars } : {}),
-        memoryKey: agent.id,
+        memoryKey: buildMemoryKey(agent.id, workspaceRepoUrl),
       };
 
       const daemonResult = await executeViaDaemon(
