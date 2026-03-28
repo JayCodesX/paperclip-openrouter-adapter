@@ -1,3 +1,22 @@
+interface StructuredLogEntry {
+    level: "info" | "warn" | "error";
+    ts: number;
+    event: string;
+    agentId?: string;
+    runId?: string;
+    model?: string;
+    resolvedModel?: string;
+    durationMs?: number;
+    inputTokens?: number;
+    outputTokens?: number;
+    cachedInputTokens?: number;
+    cacheHitRatio?: number;
+    costUsd?: number;
+    turnCount?: number;
+    subtype?: string;
+    message?: string;
+    [key: string]: unknown;
+}
 declare function recordRunCost(costUsd: number): void;
 declare function checkCostAnomaly(costUsd: number, agentId: string, runId: string, onLog: (stream: "stdout" | "stderr", line: string) => Promise<void> | void): void;
 export declare function checkVisionSupport(apiKey: string, model: string): Promise<boolean | null>;
@@ -5,7 +24,32 @@ declare function buildApiKeyPool(config: Record<string, unknown>): {
     primary: string;
     pool: string[];
 };
+export declare const SESSION_NOT_FOUND_MARKER = "not found, starting fresh";
+declare let _lastAutoStartAttemptMs: number;
+declare const AUTO_START_COOLDOWN_MS: number;
+declare const DAEMON_CB_THRESHOLD = 3;
+declare const DAEMON_CB_RESET_MS = 60000;
+declare function isDaemonCircuitOpen(url: string): boolean;
+declare function recordDaemonSuccess(url: string): void;
+declare function recordDaemonFailure(url: string): void;
+declare const DAEMON_KEY_PATH: string;
+/** How old (in ms) a daemon signing key can be before we emit a rotation warning. */
+declare const DAEMON_KEY_MAX_AGE_MS: number;
 import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
+interface BuildAdapterResultOpts {
+    resultEvent: Record<string, unknown>;
+    sessionId: string;
+    resolvedModel: string;
+    sessionLost: boolean;
+    cwd: string;
+    workspaceId: string | null;
+    workspaceRepoUrl: string | null;
+    workspaceRepoRef: string | null;
+    exitCode: number | null;
+    signal: NodeJS.Signals | null;
+}
+declare function buildAdapterResult(opts: BuildAdapterResultOpts): AdapterExecutionResult;
+declare const DEFAULT_MODEL = "deepseek/deepseek-chat-v3-0324";
 /**
  * Execute an autonomous agent loop by spawning the `orager` CLI as a
  * subprocess, using the same pattern as local CLI adapters in Paperclip.
@@ -16,5 +60,7 @@ import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclip
  */
 export declare function executeAgentLoop(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult>;
 export declare function _resetStateForTesting(): void;
-export { buildApiKeyPool, recordRunCost, checkCostAnomaly };
+/** Drain and return all structured log entries captured since the last reset. */
+export declare function _drainStructuredLogForTesting(): StructuredLogEntry[];
+export { buildApiKeyPool, recordRunCost, checkCostAnomaly, DEFAULT_MODEL, DAEMON_KEY_PATH, DAEMON_KEY_MAX_AGE_MS, isDaemonCircuitOpen, recordDaemonFailure, recordDaemonSuccess, DAEMON_CB_THRESHOLD, DAEMON_CB_RESET_MS, buildAdapterResult, _lastAutoStartAttemptMs, AUTO_START_COOLDOWN_MS, };
 //# sourceMappingURL=execute-cli.d.ts.map

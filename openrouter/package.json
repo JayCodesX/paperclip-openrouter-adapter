@@ -22,7 +22,7 @@
     "check-dist": "npm run build && git diff --exit-code dist/ || (echo 'ERROR: dist/ is stale — run npm run build and commit the result' && exit 1)"
   },
   "dependencies": {
-    "@paperclipai/adapter-utils": "latest",
+    "@paperclipai/adapter-utils": "2026.318.0",
     "picocolors": "^1.1.1"
   },
   "devDependencies": {

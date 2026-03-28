@@ -203,8 +203,8 @@ describe("listOpenRouterModels", () => {
 // ── Hardcoded fallback list vision annotations ────────────────────────────────
 
 describe("hardcoded fallback models (src/index.ts)", () => {
-  it("deepseek/deepseek-chat-v3-0324 has supportsVision: false", () => {
-    const m = fallbackModels.find((m) => m.id === "deepseek/deepseek-chat-v3-0324");
+  it("deepseek/deepseek-chat-v3-2 has supportsVision: false", () => {
+    const m = fallbackModels.find((m) => m.id === "deepseek/deepseek-chat-v3-2");
     expect(m?.supportsVision).toBe(false);
   });
 

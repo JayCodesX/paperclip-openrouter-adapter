@@ -354,4 +354,64 @@ describe("adapter daemon flow — error paths", () => {
     // The spawn fallback will fail because /nonexistent/orager does not exist
     expect(result.exitCode).not.toBeNull();
   });
+
+  it("daemon stream ends without result event → errorCode: no_result", async () => {
+    // The daemon writes a system event but closes the stream without any
+    // result event — simulates a crash or truncated response mid-run.
+    nextRunHandler = (_req, res) => {
+      res.writeHead(200, {
+        "Content-Type": "application/x-ndjson",
+        "Transfer-Encoding": "chunked",
+      });
+      res.write(
+        JSON.stringify({ type: "system", session_id: "no-result-sess", model: "openai/gpt-4o" }) +
+          "\n",
+      );
+      // Deliberately close without writing a result event
+      res.end();
+    };
+
+    const ctx = makeCtx();
+    const result = await executeAgentLoop(ctx);
+
+    expect(result.errorCode).toBe("no_result");
+    expect(result.exitCode).not.toBe(0);
+  });
+
+  it("daemon returns 401 → errorCode: auth_error (no spawn fallback for auth failures)", async () => {
+    // The daemon rejects the request as unauthorized.
+    nextRunHandler = (_req, res) => {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "invalid or expired token" }));
+    };
+
+    // Point cliPath at a nonexistent binary so we can confirm spawn was NOT
+    // attempted as a fallback (auth errors should surface immediately, not retry).
+    const ctx = makeCtx({ cliPath: "/nonexistent/orager" });
+    const result = await executeAgentLoop(ctx);
+
+    expect(result.errorCode).toBe("auth_error");
+    expect(result.exitCode).not.toBe(0);
+  });
+
+  it("maxCostUsd: 0 is not forwarded to daemon opts (enforcement disabled guard)", async () => {
+    const ctx = makeCtx({ maxCostUsd: 0 });
+    await executeAgentLoop(ctx);
+    const opts = (lastRunRequest?.body?.opts ?? {}) as Record<string, unknown>;
+    expect(opts.maxCostUsd).toBeUndefined();
+  });
+
+  it("maxCostUsd: -1 is not forwarded to daemon opts", async () => {
+    const ctx = makeCtx({ maxCostUsd: -1 });
+    await executeAgentLoop(ctx);
+    const opts = (lastRunRequest?.body?.opts ?? {}) as Record<string, unknown>;
+    expect(opts.maxCostUsd).toBeUndefined();
+  });
+
+  it("maxCostUsd: 0.5 is forwarded to daemon opts when positive", async () => {
+    const ctx = makeCtx({ maxCostUsd: 0.5 });
+    await executeAgentLoop(ctx);
+    const opts = (lastRunRequest?.body?.opts ?? {}) as Record<string, unknown>;
+    expect(opts.maxCostUsd).toBe(0.5);
+  });
 });

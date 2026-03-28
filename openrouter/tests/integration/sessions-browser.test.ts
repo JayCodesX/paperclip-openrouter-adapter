@@ -321,3 +321,99 @@ describe("filesystem fallback — corrupted session files (5.13)", () => {
     await expect(listOragerSessions({ limit: 10, offset: 0 })).resolves.toBeDefined();
   });
 });
+
+// ── Path traversal protection ────────────────────────────────────────────────
+
+describe("getOragerSession — path traversal protection", () => {
+  it("returns null for path traversal sessionId", async () => {
+    // These sessionIds contain path traversal sequences that should be rejected
+    // before any filesystem access.
+    const maliciousIds = [
+      "../../etc/passwd",
+      "../../../etc/shadow",
+      "session/../../../etc/passwd",
+      "session\x00null",
+      "session/with/slashes",
+    ];
+
+    for (const id of maliciousIds) {
+      const result = await getOragerSession(id);
+      expect(result, `Expected null for malicious sessionId: ${JSON.stringify(id)}`).toBeNull();
+    }
+  });
+
+  it("returns null for sessionId with special characters", async () => {
+    const result = await getOragerSession("session with spaces");
+    expect(result).toBeNull();
+  });
+
+  it("does not throw for empty sessionId", async () => {
+    const result = await getOragerSession("");
+    expect(result).toBeNull();
+  });
+});
+
+// ── T14: concurrent session operations do not corrupt state ──────────────────
+
+describe("concurrent session operations — no duplication or corruption (T14)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("two concurrent listOragerSessions calls both complete successfully", async () => {
+    vi.stubGlobal("fetch", makeFetchMock([SESSION_A, SESSION_B, SESSION_C]));
+
+    // Fire two concurrent calls
+    const [result1, result2] = await Promise.all([
+      listOragerSessions({ ...daemonOpts }),
+      listOragerSessions({ ...daemonOpts }),
+    ]);
+
+    // Both should return valid results without throwing
+    expect(result1.sessions).toHaveLength(3);
+    expect(result2.sessions).toHaveLength(3);
+  });
+
+  it("two concurrent getOragerSession calls for different IDs return correct results", async () => {
+    vi.stubGlobal("fetch", makeFetchMock([SESSION_A, SESSION_B]));
+
+    const [sessA, sessB] = await Promise.all([
+      getOragerSession("sess-aaa", { ...daemonOpts }),
+      getOragerSession("sess-bbb", { ...daemonOpts }),
+    ]);
+
+    expect(sessA?.sessionId).toBe("sess-aaa");
+    expect(sessB?.sessionId).toBe("sess-bbb");
+  });
+
+  it("concurrent calls for the same session ID both return the correct session (no stale data)", async () => {
+    vi.stubGlobal("fetch", makeFetchMock([SESSION_A]));
+
+    const [r1, r2] = await Promise.all([
+      getOragerSession("sess-aaa", { ...daemonOpts }),
+      getOragerSession("sess-aaa", { ...daemonOpts }),
+    ]);
+
+    // Both concurrent calls must return the correct session with no corruption
+    expect(r1?.sessionId).toBe("sess-aaa");
+    expect(r2?.sessionId).toBe("sess-aaa");
+    expect(r1?.model).toBe("gpt-4o");
+    expect(r2?.model).toBe("gpt-4o");
+  });
+
+  it("concurrent search calls do not interfere with each other", async () => {
+    vi.stubGlobal("fetch", makeFetchMock([SESSION_A, SESSION_B, SESSION_C]));
+
+    const [gptResults, claudeResults] = await Promise.all([
+      searchOragerSessions("gpt-4o", { ...daemonOpts }),
+      searchOragerSessions("claude", { ...daemonOpts }),
+    ]);
+
+    expect(gptResults.query).toBe("gpt-4o");
+    expect(claudeResults.query).toBe("claude");
+    // Results are for separate queries — no cross-contamination
+    const gptIds = gptResults.sessions.map((s) => s.sessionId);
+    const claudeIds = claudeResults.sessions.map((s) => s.sessionId);
+    expect(gptIds).not.toEqual(claudeIds);
+  });
+});

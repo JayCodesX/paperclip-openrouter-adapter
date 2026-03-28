@@ -161,4 +161,240 @@ describe("buildOpenRouterConfig", () => {
     expect(Object.prototype.hasOwnProperty.call(config, "models")).toBe(false);
     expect(Object.prototype.hasOwnProperty.call(config, "visionFallbackModels")).toBe(false);
   });
+
+  // ── wakeReasonModels ──────────────────────────────────────────────────────────
+
+  it("wakeReasonModels set → config.wakeReasonModels matches", () => {
+    const map = { comment: "deepseek/deepseek-r1", review: "openai/gpt-4o" };
+    const config = buildOpenRouterConfig(
+      makeValues({ wakeReasonModels: map } as Parameters<typeof makeValues>[0]),
+    );
+    expect(config.wakeReasonModels).toEqual(map);
+  });
+
+  it("wakeReasonModels empty object → key absent", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ wakeReasonModels: {} } as Parameters<typeof makeValues>[0]),
+    );
+    expect(Object.prototype.hasOwnProperty.call(config, "wakeReasonModels")).toBe(false);
+  });
+
+  // ── mcpServers ────────────────────────────────────────────────────────────────
+
+  it("mcpServers set → config.mcpServers matches", () => {
+    const servers = { myServer: { command: "npx", args: ["-y", "@my/mcp-server"] } };
+    const config = buildOpenRouterConfig(
+      makeValues({ mcpServers: servers } as Parameters<typeof makeValues>[0]),
+    );
+    expect(config.mcpServers).toEqual(servers);
+  });
+
+  it("requireMcpServers set → config.requireMcpServers matches", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ requireMcpServers: ["myServer"] } as Parameters<typeof makeValues>[0]),
+    );
+    expect(config.requireMcpServers).toEqual(["myServer"]);
+  });
+
+  // ── hookErrorMode ─────────────────────────────────────────────────────────────
+
+  it("hookErrorMode 'fail' → config.hookErrorMode is 'fail'", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ hookErrorMode: "fail" } as Parameters<typeof makeValues>[0]),
+    );
+    expect(config.hookErrorMode).toBe("fail");
+  });
+
+  it("hookErrorMode 'ignore' → config.hookErrorMode is 'ignore'", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ hookErrorMode: "ignore" } as Parameters<typeof makeValues>[0]),
+    );
+    expect(config.hookErrorMode).toBe("ignore");
+  });
+
+  it("hookErrorMode unset → key absent", () => {
+    const config = buildOpenRouterConfig(makeValues());
+    expect(Object.prototype.hasOwnProperty.call(config, "hookErrorMode")).toBe(false);
+  });
+
+  // ── toolErrorBudgetHardStop ───────────────────────────────────────────────────
+
+  it("toolErrorBudgetHardStop true → config.toolErrorBudgetHardStop is true", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ toolErrorBudgetHardStop: true } as Parameters<typeof makeValues>[0]),
+    );
+    expect(config.toolErrorBudgetHardStop).toBe(true);
+  });
+
+  it("toolErrorBudgetHardStop false → key absent (only set when true)", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ toolErrorBudgetHardStop: false } as Parameters<typeof makeValues>[0]),
+    );
+    expect(Object.prototype.hasOwnProperty.call(config, "toolErrorBudgetHardStop")).toBe(false);
+  });
+
+  // ── dryRun ────────────────────────────────────────────────────────────────────
+
+  it("dryRun true → config.dryRun is true", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ dryRun: true } as Parameters<typeof makeValues>[0]),
+    );
+    expect(config.dryRun).toBe(true);
+  });
+
+  it("dryRun false → key absent (only set when true)", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ dryRun: false } as Parameters<typeof makeValues>[0]),
+    );
+    expect(Object.prototype.hasOwnProperty.call(config, "dryRun")).toBe(false);
+  });
+
+  // ── settingsFile ──────────────────────────────────────────────────────────────
+
+  it("settingsFile set → config.settingsFile matches", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ settingsFile: "/home/user/.orager/custom-settings.json" } as Parameters<typeof makeValues>[0]),
+    );
+    expect(config.settingsFile).toBe("/home/user/.orager/custom-settings.json");
+  });
+
+  it("settingsFile empty string → key absent", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ settingsFile: "" } as Parameters<typeof makeValues>[0]),
+    );
+    expect(Object.prototype.hasOwnProperty.call(config, "settingsFile")).toBe(false);
+  });
+});
+
+// ── New fields added in the S-series / C-series work ─────────────────────────
+
+describe("buildOpenRouterConfig — profile field", () => {
+  it("passes through profile when set", () => {
+    const config = buildOpenRouterConfig(makeValues({ profile: "code-review" } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).profile).toBe("code-review");
+  });
+
+  it("omits profile when empty string", () => {
+    const config = buildOpenRouterConfig(makeValues({ profile: "" } as Parameters<typeof makeValues>[0]));
+    expect(Object.prototype.hasOwnProperty.call(config, "profile")).toBe(false);
+  });
+});
+
+describe("buildOpenRouterConfig — webhookUrl field", () => {
+  it("passes through webhookUrl when set", () => {
+    const config = buildOpenRouterConfig(makeValues({ webhookUrl: "https://hooks.example.com/wh" } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).webhookUrl).toBe("https://hooks.example.com/wh");
+  });
+
+  it("omits webhookUrl when empty", () => {
+    const config = buildOpenRouterConfig(makeValues());
+    expect(Object.prototype.hasOwnProperty.call(config, "webhookUrl")).toBe(false);
+  });
+});
+
+describe("buildOpenRouterConfig — summarizePrompt and summarizeFallbackKeep", () => {
+  it("passes through summarizePrompt when set", () => {
+    const config = buildOpenRouterConfig(makeValues({ summarizePrompt: "Summarize concisely." } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).summarizePrompt).toBe("Summarize concisely.");
+  });
+
+  it("passes through summarizeFallbackKeep = 0", () => {
+    const config = buildOpenRouterConfig(makeValues({ summarizeFallbackKeep: 0 } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).summarizeFallbackKeep).toBe(0);
+  });
+
+  it("passes through summarizeFallbackKeep = 20", () => {
+    const config = buildOpenRouterConfig(makeValues({ summarizeFallbackKeep: 20 } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).summarizeFallbackKeep).toBe(20);
+  });
+});
+
+describe("buildOpenRouterConfig — hookTimeoutMs and approvalTimeoutMs", () => {
+  it("passes through hookTimeoutMs when positive", () => {
+    const config = buildOpenRouterConfig(makeValues({ hookTimeoutMs: 5000 } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).hookTimeoutMs).toBe(5000);
+  });
+
+  it("omits hookTimeoutMs when 0", () => {
+    const config = buildOpenRouterConfig(makeValues({ hookTimeoutMs: 0 } as Parameters<typeof makeValues>[0]));
+    expect(Object.prototype.hasOwnProperty.call(config, "hookTimeoutMs")).toBe(false);
+  });
+
+  it("passes through approvalTimeoutMs when positive", () => {
+    const config = buildOpenRouterConfig(makeValues({ approvalTimeoutMs: 30000 } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).approvalTimeoutMs).toBe(30000);
+  });
+});
+
+describe("buildOpenRouterConfig — preset and transforms", () => {
+  it("passes through preset when set", () => {
+    const config = buildOpenRouterConfig(makeValues({ preset: "my-preset" } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).preset).toBe("my-preset");
+  });
+
+  it("passes through transforms array when non-empty", () => {
+    const config = buildOpenRouterConfig(makeValues({ transforms: ["nitro"] } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).transforms).toEqual(["nitro"]);
+  });
+
+  it("omits transforms when empty array", () => {
+    const config = buildOpenRouterConfig(makeValues({ transforms: [] } as Parameters<typeof makeValues>[0]));
+    expect(Object.prototype.hasOwnProperty.call(config, "transforms")).toBe(false);
+  });
+});
+
+describe("buildOpenRouterConfig — otelEndpoint, otelServiceName, otelResourceAttributes", () => {
+  it("passes through otelEndpoint when set", () => {
+    const config = buildOpenRouterConfig(makeValues({ otelEndpoint: "http://otel.local:4318" } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).otelEndpoint).toBe("http://otel.local:4318");
+  });
+
+  it("passes through otelServiceName when set", () => {
+    const config = buildOpenRouterConfig(makeValues({ otelServiceName: "my-agent" } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).otelServiceName).toBe("my-agent");
+  });
+
+  it("passes through otelResourceAttributes when set", () => {
+    const config = buildOpenRouterConfig(makeValues({ otelResourceAttributes: "env=prod,team=agents" } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).otelResourceAttributes).toBe("env=prod,team=agents");
+  });
+});
+
+describe("buildOpenRouterConfig — toolsFiles, maxRetries, addDirs", () => {
+  it("passes through toolsFiles array when non-empty", () => {
+    const config = buildOpenRouterConfig(makeValues({ toolsFiles: ["/tmp/tools.json"] } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).toolsFiles).toEqual(["/tmp/tools.json"]);
+  });
+
+  it("passes through maxRetries when >= 0", () => {
+    const config = buildOpenRouterConfig(makeValues({ maxRetries: 2 } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).maxRetries).toBe(2);
+  });
+
+  it("passes through maxRetries = 0 (no retries)", () => {
+    const config = buildOpenRouterConfig(makeValues({ maxRetries: 0 } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).maxRetries).toBe(0);
+  });
+
+  it("passes through addDirs array when non-empty", () => {
+    const config = buildOpenRouterConfig(makeValues({ addDirs: ["/skills"] } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).addDirs).toEqual(["/skills"]);
+  });
+});
+
+describe("buildOpenRouterConfig — maxTurns / timeoutSec / graceSec overrides", () => {
+  it("overrides default maxTurns when caller provides positive value", () => {
+    const config = buildOpenRouterConfig(makeValues({ maxTurns: 50 } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).maxTurns).toBe(50);
+  });
+
+  it("overrides default timeoutSec when caller provides value >= 0", () => {
+    const config = buildOpenRouterConfig(makeValues({ timeoutSec: 300 } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).timeoutSec).toBe(300);
+  });
+
+  it("overrides default graceSec when caller provides value >= 0", () => {
+    const config = buildOpenRouterConfig(makeValues({ graceSec: 60 } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).graceSec).toBe(60);
+  });
 });
