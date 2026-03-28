@@ -443,3 +443,58 @@ describe("buildOpenRouterConfig — memoryRetrieval", () => {
     expect(Object.prototype.hasOwnProperty.call(config, "memoryEmbeddingModel")).toBe(false);
   });
 });
+
+describe("buildOpenRouterConfig — memoryMaxChars", () => {
+  it("memoryMaxChars: 4000 → config.memoryMaxChars === 4000", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ memoryMaxChars: 4000 } as Parameters<typeof makeValues>[0]),
+    );
+    expect((config as Record<string, unknown>).memoryMaxChars).toBe(4000);
+  });
+
+  it("memoryMaxChars: 0 → field absent", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ memoryMaxChars: 0 } as Parameters<typeof makeValues>[0]),
+    );
+    expect(Object.prototype.hasOwnProperty.call(config, "memoryMaxChars")).toBe(false);
+  });
+});
+
+describe("buildOpenRouterConfig — maxIdenticalToolCallTurns", () => {
+  it("maxIdenticalToolCallTurns: 5 → config.maxIdenticalToolCallTurns === 5", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ maxIdenticalToolCallTurns: 5 } as Parameters<typeof makeValues>[0]),
+    );
+    expect((config as Record<string, unknown>).maxIdenticalToolCallTurns).toBe(5);
+  });
+
+  it("maxIdenticalToolCallTurns: 0 → field absent", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ maxIdenticalToolCallTurns: 0 } as Parameters<typeof makeValues>[0]),
+    );
+    expect(Object.prototype.hasOwnProperty.call(config, "maxIdenticalToolCallTurns")).toBe(false);
+  });
+});
+
+describe("buildOpenRouterConfig — approvalMode", () => {
+  it("approvalMode: 'question' → config.approvalMode === 'question'", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ approvalMode: "question" } as Parameters<typeof makeValues>[0]),
+    );
+    expect((config as Record<string, unknown>).approvalMode).toBe("question");
+  });
+
+  it("approvalMode: 'auto' → config.approvalMode === 'auto'", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ approvalMode: "auto" } as Parameters<typeof makeValues>[0]),
+    );
+    expect((config as Record<string, unknown>).approvalMode).toBe("auto");
+  });
+
+  it("approvalMode: '' → field absent", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ approvalMode: "" } as Parameters<typeof makeValues>[0]),
+    );
+    expect(Object.prototype.hasOwnProperty.call(config, "approvalMode")).toBe(false);
+  });
+});
