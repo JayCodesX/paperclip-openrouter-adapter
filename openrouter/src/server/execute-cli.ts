@@ -537,6 +537,100 @@ function checkRequiredEnvVars(
 }
 
 /**
+ * Options sent to the orager daemon via POST /run.
+ * Mirrors orager's AgentLoopOptions (minus apiKey/onEmit/onLog which are daemon-side).
+ * Typed explicitly so TypeScript catches misspelled field names at the call site.
+ */
+interface DaemonRunOpts {
+  // ── Identity / session ──────────────────────────────────────────────────
+  apiKey?: string;
+  model?: string;
+  models?: string[];
+  sessionId?: string | null;
+  cwd?: string;
+  addDirs?: string[];
+  // ── Run control ─────────────────────────────────────────────────────────
+  maxTurns?: number;
+  maxRetries?: number;
+  verbose?: boolean;
+  forceResume?: boolean;
+  timeoutSec?: number;
+  useFinishTool?: boolean;
+  profile?: string;
+  settingsFile?: string;
+  // ── Sampling ────────────────────────────────────────────────────────────
+  temperature?: number;
+  top_p?: number;
+  top_k?: number;
+  frequency_penalty?: number;
+  presence_penalty?: number;
+  repetition_penalty?: number;
+  min_p?: number;
+  seed?: number;
+  stop?: string[];
+  parallel_tool_calls?: boolean;
+  tool_choice?: string | Record<string, unknown>;
+  response_format?: Record<string, unknown>;
+  // ── Model routing ───────────────────────────────────────────────────────
+  reasoning?: Record<string, unknown>;
+  provider?: Record<string, unknown>;
+  preset?: string;
+  transforms?: string[];
+  // ── Cost limits ─────────────────────────────────────────────────────────
+  maxCostUsd?: number;
+  maxCostUsdSoft?: number;
+  costPerInputToken?: number;
+  costPerOutputToken?: number;
+  // ── Site identity ───────────────────────────────────────────────────────
+  siteUrl?: string;
+  siteName?: string;
+  // ── Tool settings ───────────────────────────────────────────────────────
+  toolTimeouts?: Record<string, number>;
+  maxSpawnDepth?: number;
+  maxIdenticalToolCallTurns?: number;
+  toolErrorBudgetHardStop?: number | boolean;
+  enableBrowserTools?: boolean;
+  tagToolOutputs?: boolean;
+  trackFileChanges?: boolean;
+  // ── Security (daemon strips these) ──────────────────────────────────────
+  dangerouslySkipPermissions?: boolean;
+  sandboxRoot?: string;
+  bashPolicy?: Record<string, unknown>;
+  requireApproval?: string | boolean | Record<string, unknown>;
+  // ── Summarization ───────────────────────────────────────────────────────
+  summarizeAt?: number;
+  summarizeModel?: string;
+  summarizeKeepRecentTurns?: number;
+  summarizePrompt?: string;
+  summarizeFallbackKeep?: number;
+  // ── Plan mode ───────────────────────────────────────────────────────────
+  planMode?: string;
+  // ── Context ─────────────────────────────────────────────────────────────
+  injectContext?: string;
+  appendSystemPrompt?: string;
+  promptContent?: Array<Record<string, unknown>>;
+  // ── Approval ────────────────────────────────────────────────────────────
+  approvalMode?: string;
+  approvalAnswer?: string;
+  approvalTimeoutMs?: number;
+  // ── Turn routing ────────────────────────────────────────────────────────
+  turnModelRules?: unknown;
+  // ── Hooks ───────────────────────────────────────────────────────────────
+  hooks?: unknown;
+  hookTimeoutMs?: number;
+  hookErrorMode?: string;
+  webhookUrl?: string;
+  // ── MCP ─────────────────────────────────────────────────────────────────
+  mcpServers?: unknown;
+  requireMcpServers?: string[];
+  // ── API key pool ────────────────────────────────────────────────────────
+  apiKeys?: string[];
+  requiredEnvVars?: string[];
+  // ── Memory ──────────────────────────────────────────────────────────────
+  memoryKey?: string;
+}
+
+/**
  * Execute an agent run by POSTing to the orager daemon.
  * Returns the same AdapterExecutionResult shape as the spawn path.
  */
@@ -546,7 +640,7 @@ async function executeViaDaemon(
   agentId: string,
   prompt: string,
   promptContent: Array<{ type: string; [key: string]: unknown }> | null,
-  daemonOpts: Record<string, unknown>,
+  daemonOpts: DaemonRunOpts,
   timeoutSec: number,
   onLog: (stream: "stdout" | "stderr", line: string) => Promise<void> | void,
   maxCostUsdSoft?: number,
@@ -841,7 +935,7 @@ async function executeViaDaemon(
     sessionId,
     resolvedModel,
     sessionLost,
-    cwd: typeof daemonOpts.cwd === "string" ? daemonOpts.cwd : "",
+    cwd: daemonOpts.cwd ?? "",
     workspaceId: null,
     workspaceRepoUrl: null,
     workspaceRepoRef: null,
@@ -1040,6 +1134,22 @@ export async function executeAgentLoop(
     (wakeReason && typeof wakeReasonModels[wakeReason] === "string"
       ? (wakeReasonModels[wakeReason] as string)
       : null) ?? model;
+
+  // Emit a structured log entry when wakeReason routes to a different model so
+  // the routing decision is captured in the structured audit trail.
+  if (wakeReason && effectiveModel !== model) {
+    structuredLog({
+      level: "info",
+      ts: Date.now(),
+      event: "wake_reason_model_routed",
+      agentId: agent.id,
+      runId,
+      wakeReason,
+      requestedModel: model,
+      effectiveModel,
+      message: `wakeReasonModels: routing '${wakeReason}' → '${effectiveModel}' (base model: '${model}')`,
+    });
+  }
 
   // Support both maxTurns and maxTurnsPerRun (alias for compatibility)
   const maxTurns = Math.max(0, safeNumber(
@@ -1424,8 +1534,10 @@ export async function executeAgentLoop(
   }
 
   // ── settingsFile validation ───────────────────────────────────────────────
-  // Relative paths must resolve within cwd (symlink-safe). Absolute paths are
-  // operator-trusted (e.g. ~/.orager/custom.json). Null bytes are always rejected.
+  // Relative paths must resolve within cwd (symlink-safe).
+  // Absolute paths must be under an allowlist of safe roots (default: home dir;
+  // extend via ORAGER_SETTINGS_ALLOWED_ROOTS env var, colon-separated).
+  // Null bytes are always rejected.
   // On the daemon path settingsFile is stripped by sanitizeDaemonRunOpts anyway.
   const settingsFile = await (async () => {
     const raw = _rawSettingsFile;
@@ -1434,7 +1546,29 @@ export async function executeAgentLoop(
       void onLog("stderr", `[openrouter adapter] WARNING: settingsFile contains null bytes — ignoring\n`);
       return "";
     }
-    if (path.isAbsolute(raw)) return raw; // absolute paths: operator trust
+    if (path.isAbsolute(raw)) {
+      // Restrict absolute paths to an allowlist of safe root directories.
+      // Default: home directory only. Operators can extend via ORAGER_SETTINGS_ALLOWED_ROOTS
+      // (colon-separated list of absolute paths).
+      const extraRoots = (process.env["ORAGER_SETTINGS_ALLOWED_ROOTS"] ?? "")
+        .split(":")
+        .map((r) => r.trim())
+        .filter(Boolean);
+      const allowedRoots = [os.homedir(), ...extraRoots];
+      const isAllowed = allowedRoots.some(
+        (root) => raw === root || raw.startsWith(root + path.sep),
+      );
+      if (!isAllowed) {
+        void onLog(
+          "stderr",
+          `[openrouter adapter] WARNING: settingsFile '${raw}' is outside allowed roots ` +
+            `(${allowedRoots.map((r) => `'${r}'`).join(", ")}) — ignoring. ` +
+            `Set ORAGER_SETTINGS_ALLOWED_ROOTS to allow additional directories.\n`,
+        );
+        return "";
+      }
+      return raw;
+    }
     const abs = path.resolve(cwd, raw);
     let real: string;
     try {
@@ -2057,7 +2191,7 @@ export async function executeAgentLoop(
 
     if (alive && signingKey) {
       // Build opts for daemon — includes apiKey so key rotation takes effect
-      const daemonOpts: Record<string, unknown> = {
+      const daemonOpts: DaemonRunOpts = {
         apiKey,
         model: effectiveModel,
         models: models.length > 0 ? models : undefined,
