@@ -1600,6 +1600,7 @@ export async function executeAgentLoop(
   // don't declare vision support, but the model-level check is a separate
   // question — not all providers expose vision for every model even when the
   // base weights support it.
+  let visionFallbackNote: string | null = null;
   if (promptContent !== null) {
     const visionOk = await checkVisionSupport(apiKey, effectiveModel);
     if (visionOk === false) {
@@ -1632,6 +1633,7 @@ export async function executeAgentLoop(
       if (fallbackModel) {
         const originalModel = effectiveModel;
         effectiveModel = fallbackModel;
+        visionFallbackNote = `vision fallback: ${originalModel} → ${fallbackModel}`;
         // Recompute timeout for the new model (only matters when not explicitly set).
         timeoutSec = Math.max(0, safeNumber(config.timeoutSec, defaultTimeoutForModel(effectiveModel)));
         structuredLog({
@@ -1646,6 +1648,11 @@ export async function executeAgentLoop(
       } else {
         // No working fallback found — either all candidates lack vision or
         // the user explicitly disabled the fallback chain with [].
+        if (fallbackExplicitlyDisabled) {
+          visionFallbackNote = "vision fallback disabled (visionFallbackModels: [])";
+        } else {
+          visionFallbackNote = "vision: no fallback available";
+        }
         structuredLog({
           level: "warn", ts: Date.now(), event: "vision_not_supported",
           agentId: agent.id, runId, model: effectiveModel,
@@ -1990,6 +1997,7 @@ export async function executeAgentLoop(
         ...(safeInstructionsFilePath
           ? [`instructions: ${safeInstructionsFilePath}`]
           : []),
+        ...(visionFallbackNote ? [visionFallbackNote] : []),
       ],
       env: redactEnvForLogs(env),
       prompt,

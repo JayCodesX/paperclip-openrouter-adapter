@@ -139,3 +139,6 @@ export const sessionCodec: AdapterSessionCodec = {
       : `session:${sessionId.slice(0, 8)}`;
   },
 };
+
+export { buildAdapterResult } from "./server/execute-cli.js";
+export type { AdapterExecutionResult } from "@paperclipai/adapter-utils";

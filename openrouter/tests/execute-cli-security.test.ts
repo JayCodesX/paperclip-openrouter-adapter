@@ -354,3 +354,85 @@ describe("webhookUrl loopback SSRF guard", () => {
     expect(stderrLines).not.toMatch(/webhookUrl.*loopback/i);
   });
 });
+
+// ── settingsFile traversal guard ──────────────────────────────────────────────
+
+describe("settingsFile traversal guard", () => {
+  beforeEach(() => { _resetStateForTesting(); });
+
+  function makeSettingsCtx(settingsFile: string, cwdOverride?: string): Parameters<typeof executeAgentLoop>[0] {
+    return {
+      runId: "test-settings-traversal",
+      agent: { id: "agent-settings", companyId: "co", name: "SettingsAgent", adapterType: "openrouter", adapterConfig: {} },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        apiKey: "sk-test",
+        model: "openai/gpt-4o",
+        settingsFile,
+        cliPath: "/nonexistent/orager-binary-xyz",
+        ...(cwdOverride ? { cwd: cwdOverride } : {}),
+      },
+      context: { wakeReason: "manual" },
+      onLog: vi.fn().mockResolvedValue(undefined) as (s: "stdout" | "stderr", l: string) => Promise<void>,
+      onMeta: vi.fn().mockResolvedValue(undefined),
+    };
+  }
+
+  it("allows an absolute settingsFile path without warning", async () => {
+    const ctx = makeSettingsCtx("/etc/hosts"); // absolute — operator trust
+    const result = await executeAgentLoop(ctx);
+
+    const stderrLines = (ctx.onLog as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([s]: [string]) => s === "stderr")
+      .map(([, m]: [string, string]) => m)
+      .join("");
+
+    expect(stderrLines).not.toMatch(/settingsFile.*outside cwd/i);
+    expect(result.errorCode).toBe("cli_not_found");
+  });
+
+  it("blocks a relative settingsFile that resolves outside cwd", async () => {
+    const ctx = makeSettingsCtx("../../etc/passwd", os.tmpdir());
+    await executeAgentLoop(ctx);
+
+    const stderrLines = (ctx.onLog as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([s]: [string]) => s === "stderr")
+      .map(([, m]: [string, string]) => m)
+      .join("");
+
+    expect(stderrLines).toMatch(/settingsFile.*outside cwd/i);
+  });
+
+  it("blocks a settingsFile containing null bytes", async () => {
+    const ctx = makeSettingsCtx("settings\x00evil.json", os.tmpdir());
+    await executeAgentLoop(ctx);
+
+    const stderrLines = (ctx.onLog as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([s]: [string]) => s === "stderr")
+      .map(([, m]: [string, string]) => m)
+      .join("");
+
+    expect(stderrLines).toMatch(/null bytes/i);
+  });
+
+  it("allows a valid relative settingsFile within cwd", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "orager-settings-test-"));
+    try {
+      const settingsPath = path.join(tmpDir, "my-settings.json");
+      await fs.writeFile(settingsPath, JSON.stringify({ model: "openai/gpt-4o" }));
+
+      const ctx = makeSettingsCtx("my-settings.json", tmpDir);
+      const result = await executeAgentLoop(ctx);
+
+      const stderrLines = (ctx.onLog as ReturnType<typeof vi.fn>).mock.calls
+        .filter(([s]: [string]) => s === "stderr")
+        .map(([, m]: [string, string]) => m)
+        .join("");
+
+      expect(stderrLines).not.toMatch(/settingsFile/i);
+      expect(result.errorCode).toBe("cli_not_found");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+});
