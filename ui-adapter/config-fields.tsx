@@ -653,6 +653,30 @@ export function OpenRouterConfigFields({
       </Field>
 
       <Field
+        label="Max Spawn Depth"
+        hint="Maximum nesting depth for spawned sub-agents. Default: 3. Set to 0 to disable sub-agent spawning."
+      >
+        <DraftNumberInput
+          value={
+            isCreate
+              ? Number(values!.maxSpawnDepth ?? 0)
+              : eff(
+                  "adapterConfig",
+                  "maxSpawnDepth",
+                  Number(config.maxSpawnDepth ?? 0),
+                )
+          }
+          onCommit={(v) =>
+            isCreate
+              ? set!({ maxSpawnDepth: v >= 0 ? v : undefined })
+              : mark("adapterConfig", "maxSpawnDepth", v >= 0 ? v : undefined)
+          }
+          immediate
+          className={inputClass}
+        />
+      </Field>
+
+      <Field
         label="Approval Mode"
         hint="Controls tool approval. 'question' pauses for user input; 'auto' approves all."
       >
@@ -674,6 +698,30 @@ export function OpenRouterConfigFields({
           <option value="question">question</option>
           <option value="auto">auto</option>
         </select>
+      </Field>
+
+      <Field
+        label="Approval Timeout (ms)"
+        hint="How long to wait for user approval before timing out. Default: no timeout."
+      >
+        <DraftNumberInput
+          value={
+            isCreate
+              ? Number(values!.approvalTimeoutMs ?? 0)
+              : eff(
+                  "adapterConfig",
+                  "approvalTimeoutMs",
+                  Number(config.approvalTimeoutMs ?? 0),
+                )
+          }
+          onCommit={(v) =>
+            isCreate
+              ? set!({ approvalTimeoutMs: v > 0 ? v : undefined })
+              : mark("adapterConfig", "approvalTimeoutMs", v > 0 ? v : undefined)
+          }
+          immediate
+          className={inputClass}
+        />
       </Field>
 
       <Field
@@ -850,6 +898,21 @@ export function OpenRouterConfigFields({
           minRows={3}
         />
       </Field>
+
+      <ToggleField
+        label="Read Project Instructions"
+        hint="When enabled, orager reads CLAUDE.md / project instruction files from the workspace and injects them into the system prompt."
+        checked={
+          isCreate
+            ? (values!.readProjectInstructions as boolean) ?? true
+            : eff("adapterConfig", "readProjectInstructions", config.readProjectInstructions !== false)
+        }
+        onChange={(v) =>
+          isCreate
+            ? set!({ readProjectInstructions: v })
+            : mark("adapterConfig", "readProjectInstructions", v)
+        }
+      />
 
       <Field
         label="Instructions file path"

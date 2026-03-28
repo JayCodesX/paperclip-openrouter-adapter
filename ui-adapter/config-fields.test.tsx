@@ -507,4 +507,46 @@ describe("OpenRouterConfigFields", () => {
     fireEvent.change(select, { target: { value: "question" } });
     expect(set).toHaveBeenCalledWith({ approvalMode: "question" });
   });
+
+  // 19. readProjectInstructions toggle renders and onChange fires set() correctly
+  it("readProjectInstructions: toggle renders and onChange fires set() correctly", () => {
+    const set = vi.fn();
+    render(<OpenRouterConfigFields {...makeProps({ set })} />);
+
+    const toggle = screen.getByRole("button", { name: /read project instructions/i });
+    expect(toggle).toBeDefined();
+
+    fireEvent.click(toggle);
+    expect(set).toHaveBeenCalledWith({ readProjectInstructions: false });
+  });
+
+  // 20. maxSpawnDepth input renders and onChange fires set() correctly
+  it("maxSpawnDepth: input renders and onChange fires set() correctly", () => {
+    const set = vi.fn();
+    render(<OpenRouterConfigFields {...makeProps({ set })} />);
+
+    const label = screen.getByText("Max Spawn Depth");
+    expect(label).toBeDefined();
+
+    const fieldContainer = label.closest("div")!;
+    const input = fieldContainer.querySelector('input[type="number"]')!;
+    fireEvent.change(input, { target: { value: "5" } });
+
+    expect(set).toHaveBeenCalledWith({ maxSpawnDepth: 5 });
+  });
+
+  // 21. approvalTimeoutMs input renders and onChange fires set() correctly
+  it("approvalTimeoutMs: input renders and onChange fires set() correctly", () => {
+    const set = vi.fn();
+    render(<OpenRouterConfigFields {...makeProps({ set })} />);
+
+    const label = screen.getByText("Approval Timeout (ms)");
+    expect(label).toBeDefined();
+
+    const fieldContainer = label.closest("div")!;
+    const input = fieldContainer.querySelector('input[type="number"]')!;
+    fireEvent.change(input, { target: { value: "30000" } });
+
+    expect(set).toHaveBeenCalledWith({ approvalTimeoutMs: 30000 });
+  });
 });

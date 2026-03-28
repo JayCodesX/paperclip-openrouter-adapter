@@ -324,6 +324,35 @@ describe("buildOpenRouterConfig — hookTimeoutMs and approvalTimeoutMs", () => 
     const config = buildOpenRouterConfig(makeValues({ approvalTimeoutMs: 30000 } as Parameters<typeof makeValues>[0]));
     expect((config as Record<string, unknown>).approvalTimeoutMs).toBe(30000);
   });
+
+  it("omits approvalTimeoutMs when 0 (only positive values)", () => {
+    const config = buildOpenRouterConfig(makeValues({ approvalTimeoutMs: 0 } as Parameters<typeof makeValues>[0]));
+    expect(Object.prototype.hasOwnProperty.call(config, "approvalTimeoutMs")).toBe(false);
+  });
+});
+
+describe("buildOpenRouterConfig — readProjectInstructions", () => {
+  it("readProjectInstructions: false → config.readProjectInstructions === false", () => {
+    const config = buildOpenRouterConfig(makeValues({ readProjectInstructions: false } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).readProjectInstructions).toBe(false);
+  });
+
+  it("readProjectInstructions: true → config.readProjectInstructions === true", () => {
+    const config = buildOpenRouterConfig(makeValues({ readProjectInstructions: true } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).readProjectInstructions).toBe(true);
+  });
+});
+
+describe("buildOpenRouterConfig — maxSpawnDepth", () => {
+  it("maxSpawnDepth: 5 → config.maxSpawnDepth === 5", () => {
+    const config = buildOpenRouterConfig(makeValues({ maxSpawnDepth: 5 } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).maxSpawnDepth).toBe(5);
+  });
+
+  it("maxSpawnDepth: 0 → config.maxSpawnDepth === 0 (zero is valid — disables spawning)", () => {
+    const config = buildOpenRouterConfig(makeValues({ maxSpawnDepth: 0 } as Parameters<typeof makeValues>[0]));
+    expect((config as Record<string, unknown>).maxSpawnDepth).toBe(0);
+  });
 });
 
 describe("buildOpenRouterConfig — preset and transforms", () => {
