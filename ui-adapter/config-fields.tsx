@@ -230,62 +230,6 @@ export function OpenRouterConfigFields({
       </Field>
 
       <Field
-        label="Fallback Model"
-        hint="Used when the primary model fails (e.g. rate limit)."
-      >
-        <select
-          className={selectClass}
-          value={
-            isCreate
-              ? (values!.fallbackModel as string | undefined) ?? ""
-              : eff("adapterConfig", "fallbackModel", String(config.fallbackModel ?? ""))
-          }
-          onChange={(e) =>
-            isCreate
-              ? set!({ fallbackModel: e.target.value } as Parameters<typeof set>[0])
-              : mark("adapterConfig", "fallbackModel", e.target.value || undefined)
-          }
-          aria-label="Fallback Model"
-        >
-          <option value="">None</option>
-          {models.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.label}
-            </option>
-          ))}
-        </select>
-      </Field>
-
-      <Field
-        label="Vision Model"
-        hint="Overrides the primary model when the task contains images."
-      >
-        <select
-          className={selectClass}
-          value={
-            isCreate
-              ? (values!.visionModel as string | undefined) ?? ""
-              : eff("adapterConfig", "visionModel", String(config.visionModel ?? ""))
-          }
-          onChange={(e) =>
-            isCreate
-              ? set!({ visionModel: e.target.value } as Parameters<typeof set>[0])
-              : mark("adapterConfig", "visionModel", e.target.value || undefined)
-          }
-          aria-label="Vision Model"
-        >
-          <option value="">None</option>
-          {(models as Array<{ id: string; label: string; supportsVision?: boolean }>)
-            .filter((m) => m.supportsVision !== false)
-            .map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label}
-              </option>
-            ))}
-        </select>
-      </Field>
-
-      <Field
         label="orager CLI path"
         hint="Path to the orager binary. Leave blank if orager is on your PATH (npm install -g @paperclipai/orager)."
       >
