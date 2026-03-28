@@ -1463,6 +1463,30 @@ export function OpenRouterConfigFields({
         />
       </Field>
 
+      {/* ===== API KEY ISOLATION ===== */}
+      <p className={sectionHeadingClass}>API Key Isolation</p>
+
+      <Field
+        label="Agent API Key"
+        hint="Per-agent OpenRouter API key. Overrides the global key — isolates this agent's rate limits from others."
+      >
+        <DraftInput
+          value={
+            isCreate
+              ? String(values!.agentApiKey ?? "")
+              : eff("adapterConfig", "agentApiKey", String(config.agentApiKey ?? ""))
+          }
+          onCommit={(v) =>
+            isCreate
+              ? set!({ agentApiKey: v || undefined })
+              : mark("adapterConfig", "agentApiKey", v || undefined)
+          }
+          immediate
+          className={inputClass}
+          placeholder="sk-or-..."
+        />
+      </Field>
+
       {/* ===== DEV / DEBUG ===== */}
       <p className={sectionHeadingClass}>Dev / debug</p>
 

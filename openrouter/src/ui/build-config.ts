@@ -311,6 +311,11 @@ export function buildOpenRouterConfig(
     ac.graceSec = vc.graceSec;
   }
 
+  // ── Per-agent API key isolation ───────────────────────────────────────────
+  if (typeof vc.agentApiKey === "string" && vc.agentApiKey.trim()) {
+    ac.agentApiKey = vc.agentApiKey.trim();
+  }
+
   // ── Memory retrieval ──────────────────────────────────────────────────────
   if (vc.memoryRetrieval === "embedding") {
     ac.memoryRetrieval = "embedding";
