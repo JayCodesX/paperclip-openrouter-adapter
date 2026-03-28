@@ -1553,20 +1553,30 @@ export function OpenRouterConfigFields({
       {/* ===== DEV / DEBUG ===== */}
       <p className={sectionHeadingClass}>Dev / debug</p>
 
-      <ToggleField
-        label="Dry run"
-        hint="When enabled, the adapter logs what it would do but makes no API calls. Use to verify config without spending tokens."
-        checked={
-          isCreate
-            ? (values!.dryRun as boolean) ?? false
-            : eff("adapterConfig", "dryRun", config.dryRun === true)
-        }
-        onChange={(v) =>
-          isCreate
-            ? set!({ dryRun: v })
-            : mark("adapterConfig", "dryRun", v)
-        }
-      />
+      {(() => {
+        const isDryRun: boolean = isCreate
+          ? (values!.dryRun as boolean) ?? false
+          : eff("adapterConfig", "dryRun", config.dryRun === true);
+        return (
+          <>
+            <ToggleField
+              label="Dry run"
+              hint="When enabled, the adapter logs what it would do but makes no API calls. Use to verify config without spending tokens."
+              checked={isDryRun}
+              onChange={(v) =>
+                isCreate
+                  ? set!({ dryRun: v })
+                  : mark("adapterConfig", "dryRun", v)
+              }
+            />
+            {isDryRun && (
+              <div className="rounded-md border border-yellow-500/40 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-600 dark:text-yellow-400">
+                ⚠️ Dry-run mode is active — the agent will plan actions but not execute tools or make changes.
+              </div>
+            )}
+          </>
+        );
+      })()}
 
       <ToggleField
         label="Skip permissions"

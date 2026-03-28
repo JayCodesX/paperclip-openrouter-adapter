@@ -549,4 +549,35 @@ describe("OpenRouterConfigFields", () => {
 
     expect(set).toHaveBeenCalledWith({ approvalTimeoutMs: 30000 });
   });
+
+  // 22. dryRun banner — not shown when dryRun is false (default)
+  it("dryRun: warning banner is NOT rendered when dryRun is false", () => {
+    render(<OpenRouterConfigFields {...makeProps({ values: { dryRun: false } })} />);
+    expect(screen.queryByText(/dry-run mode is active/i)).toBeNull();
+  });
+
+  // 23. dryRun banner — shown when dryRun is true
+  it("dryRun: warning banner IS rendered when dryRun is true", () => {
+    render(<OpenRouterConfigFields {...makeProps({ values: { dryRun: true } })} />);
+    expect(screen.getByText(/dry-run mode is active/i)).toBeDefined();
+  });
+
+  // 24. dryRun toggle — toggling to true calls set() and banner appears
+  it("dryRun: toggling to true calls set() and banner appears", () => {
+    const set = vi.fn();
+    const { rerender } = render(<OpenRouterConfigFields {...makeProps({ set, values: { dryRun: false } })} />);
+
+    // Banner should not be visible initially
+    expect(screen.queryByText(/dry-run mode is active/i)).toBeNull();
+
+    // Click the toggle
+    const toggle = screen.getByRole("button", { name: /dry run/i });
+    fireEvent.click(toggle);
+
+    expect(set).toHaveBeenCalledWith({ dryRun: true });
+
+    // Re-render with dryRun: true to simulate the state update
+    rerender(<OpenRouterConfigFields {...makeProps({ set, values: { dryRun: true } })} />);
+    expect(screen.getByText(/dry-run mode is active/i)).toBeDefined();
+  });
 });
