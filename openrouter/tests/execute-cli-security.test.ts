@@ -360,6 +360,28 @@ describe("webhookUrl loopback SSRF guard", () => {
 describe("settingsFile traversal guard", () => {
   beforeEach(() => { _resetStateForTesting(); });
 
+  async function runExecuteCliForSettingsFileTest(settingsFile: string, warns: string[]): Promise<void> {
+    const ctx: Parameters<typeof executeAgentLoop>[0] = {
+      runId: "test-settings-allowlist",
+      agent: { id: "agent-settings", companyId: "co", name: "SettingsAgent", adapterType: "openrouter", adapterConfig: {} },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        apiKey: "sk-test",
+        model: "openai/gpt-4o",
+        settingsFile,
+        cliPath: "/nonexistent/orager-binary-xyz",
+      },
+      context: { wakeReason: "manual" },
+      onLog: vi.fn().mockResolvedValue(undefined) as (s: "stdout" | "stderr", l: string) => Promise<void>,
+      onMeta: vi.fn().mockResolvedValue(undefined),
+    };
+    await executeAgentLoop(ctx);
+    const stderrLines = (ctx.onLog as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([s]: [string]) => s === "stderr")
+      .map(([, m]: [string, string]) => m);
+    warns.push(...stderrLines);
+  }
+
   function makeSettingsCtx(settingsFile: string, cwdOverride?: string): Parameters<typeof executeAgentLoop>[0] {
     return {
       runId: "test-settings-traversal",
@@ -378,17 +400,16 @@ describe("settingsFile traversal guard", () => {
     };
   }
 
-  it("allows an absolute settingsFile path without warning", async () => {
-    const ctx = makeSettingsCtx("/etc/hosts"); // absolute — operator trust
-    const result = await executeAgentLoop(ctx);
+  it("blocks an absolute settingsFile path outside allowed roots", async () => {
+    const ctx = makeSettingsCtx("/etc/hosts"); // outside home dir — no longer operator trust
+    await executeAgentLoop(ctx);
 
     const stderrLines = (ctx.onLog as ReturnType<typeof vi.fn>).mock.calls
       .filter(([s]: [string]) => s === "stderr")
       .map(([, m]: [string, string]) => m)
       .join("");
 
-    expect(stderrLines).not.toMatch(/settingsFile.*outside cwd/i);
-    expect(result.errorCode).toBe("cli_not_found");
+    expect(stderrLines).toMatch(/outside allowed roots/i);
   });
 
   it("blocks a relative settingsFile that resolves outside cwd", async () => {
@@ -434,5 +455,20 @@ describe("settingsFile traversal guard", () => {
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     }
+  });
+
+  it("absolute path under home directory is allowed", async () => {
+    const homeDir = os.homedir();
+    const settingsPath = path.join(homeDir, ".orager", "settings.json");
+    const warns: string[] = [];
+    await runExecuteCliForSettingsFileTest(settingsPath, warns);
+    expect(warns.some((w) => w.includes("outside allowed roots"))).toBe(false);
+    expect(warns.some((w) => w.includes("null bytes"))).toBe(false);
+  });
+
+  it("absolute path outside home directory is blocked unless ORAGER_SETTINGS_ALLOWED_ROOTS allows it", async () => {
+    const warns: string[] = [];
+    await runExecuteCliForSettingsFileTest("/etc/passwd", warns);
+    expect(warns.some((w) => w.includes("outside allowed roots"))).toBe(true);
   });
 });

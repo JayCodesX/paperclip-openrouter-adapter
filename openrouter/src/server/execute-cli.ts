@@ -1135,6 +1135,22 @@ export async function executeAgentLoop(
       ? (wakeReasonModels[wakeReason] as string)
       : null) ?? model;
 
+  // Emit a structured log entry when wakeReason routes to a different model so
+  // the routing decision is captured in the structured audit trail.
+  if (wakeReason && effectiveModel !== model) {
+    structuredLog({
+      level: "info",
+      ts: Date.now(),
+      event: "wake_reason_model_routed",
+      agentId: agent.id,
+      runId,
+      wakeReason,
+      requestedModel: model,
+      effectiveModel,
+      message: `wakeReasonModels: routing '${wakeReason}' → '${effectiveModel}' (base model: '${model}')`,
+    });
+  }
+
   // Support both maxTurns and maxTurnsPerRun (alias for compatibility)
   const maxTurns = Math.max(0, safeNumber(
     config.maxTurnsPerRun ?? config.maxTurns,
@@ -1518,8 +1534,10 @@ export async function executeAgentLoop(
   }
 
   // ── settingsFile validation ───────────────────────────────────────────────
-  // Relative paths must resolve within cwd (symlink-safe). Absolute paths are
-  // operator-trusted (e.g. ~/.orager/custom.json). Null bytes are always rejected.
+  // Relative paths must resolve within cwd (symlink-safe).
+  // Absolute paths must be under an allowlist of safe roots (default: home dir;
+  // extend via ORAGER_SETTINGS_ALLOWED_ROOTS env var, colon-separated).
+  // Null bytes are always rejected.
   // On the daemon path settingsFile is stripped by sanitizeDaemonRunOpts anyway.
   const settingsFile = await (async () => {
     const raw = _rawSettingsFile;
@@ -1528,7 +1546,29 @@ export async function executeAgentLoop(
       void onLog("stderr", `[openrouter adapter] WARNING: settingsFile contains null bytes — ignoring\n`);
       return "";
     }
-    if (path.isAbsolute(raw)) return raw; // absolute paths: operator trust
+    if (path.isAbsolute(raw)) {
+      // Restrict absolute paths to an allowlist of safe root directories.
+      // Default: home directory only. Operators can extend via ORAGER_SETTINGS_ALLOWED_ROOTS
+      // (colon-separated list of absolute paths).
+      const extraRoots = (process.env["ORAGER_SETTINGS_ALLOWED_ROOTS"] ?? "")
+        .split(":")
+        .map((r) => r.trim())
+        .filter(Boolean);
+      const allowedRoots = [os.homedir(), ...extraRoots];
+      const isAllowed = allowedRoots.some(
+        (root) => raw === root || raw.startsWith(root + path.sep),
+      );
+      if (!isAllowed) {
+        void onLog(
+          "stderr",
+          `[openrouter adapter] WARNING: settingsFile '${raw}' is outside allowed roots ` +
+            `(${allowedRoots.map((r) => `'${r}'`).join(", ")}) — ignoring. ` +
+            `Set ORAGER_SETTINGS_ALLOWED_ROOTS to allow additional directories.\n`,
+        );
+        return "";
+      }
+      return raw;
+    }
     const abs = path.resolve(cwd, raw);
     let real: string;
     try {
