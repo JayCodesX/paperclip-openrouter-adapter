@@ -657,6 +657,8 @@ interface DaemonRunOpts {
   // ── API key pool ────────────────────────────────────────────────────────
   apiKeys?: string[];
   requiredEnvVars?: string[];
+  // ── Per-agent API key isolation ─────────────────────────────────────────
+  agentApiKey?: string;
   // ── Memory ──────────────────────────────────────────────────────────────
   memoryKey?: string;
   memoryRetrieval?: string;
@@ -1967,6 +1969,10 @@ export async function executeAgentLoop(
   if (requiredEnvVars.length > 0) configObj.requiredEnvVars = requiredEnvVars;
   configObj.memoryKey = buildMemoryKey(agent.id, workspaceRepoUrl);
 
+  // Per-agent API key isolation
+  const agentApiKey = asString(config.agentApiKey, "");
+  if (agentApiKey.trim()) configObj.agentApiKey = agentApiKey.trim();
+
   const memoryRetrieval = asString(config.memoryRetrieval, "");
   if (memoryRetrieval === "embedding") {
     configObj.memoryRetrieval = "embedding";
@@ -2322,6 +2328,7 @@ export async function executeAgentLoop(
         timeoutSec,
         ...(apiKeyPool.length > 1 ? { apiKeys: apiKeyPool } : {}),
         ...(requiredEnvVars.length > 0 ? { requiredEnvVars } : {}),
+        ...(asString(config.agentApiKey, "").trim() ? { agentApiKey: asString(config.agentApiKey, "").trim() } : {}),
         memoryKey: buildMemoryKey(agent.id, workspaceRepoUrl),
         ...(asString(config.memoryRetrieval, "") === "embedding"
           ? {
