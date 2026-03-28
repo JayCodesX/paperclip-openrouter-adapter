@@ -1061,7 +1061,7 @@ export async function executeAgentLoop(
   const sandboxRoot = asString(config.sandboxRoot, "");
   const useFinishTool = asBoolean(config.useFinishTool, false);
   const profile = asString(config.profile, "").trim();
-  const settingsFile = asString(config.settingsFile, "").trim();
+  const _rawSettingsFile = asString(config.settingsFile, "").trim(); // validated after cwd is resolved
   const forceResume = asBoolean(config.forceResume, false);
   const daemonAutoStart = asBoolean(config.daemonAutoStart, false);
 
@@ -1423,6 +1423,34 @@ export async function executeAgentLoop(
     // Non-fatal — spawn will fail with a clearer error if cwd is truly invalid
   }
 
+  // ── settingsFile validation ───────────────────────────────────────────────
+  // Relative paths must resolve within cwd (symlink-safe). Absolute paths are
+  // operator-trusted (e.g. ~/.orager/custom.json). Null bytes are always rejected.
+  // On the daemon path settingsFile is stripped by sanitizeDaemonRunOpts anyway.
+  const settingsFile = await (async () => {
+    const raw = _rawSettingsFile;
+    if (!raw) return "";
+    if (raw.includes("\x00")) {
+      void onLog("stderr", `[openrouter adapter] WARNING: settingsFile contains null bytes — ignoring\n`);
+      return "";
+    }
+    if (path.isAbsolute(raw)) return raw; // absolute paths: operator trust
+    const abs = path.resolve(cwd, raw);
+    let real: string;
+    try {
+      real = await fs.realpath(abs);
+    } catch {
+      real = abs; // file may not exist yet; fall back to lexical path
+    }
+    let realCwd = cwd;
+    try { realCwd = await fs.realpath(cwd); } catch { /* fallback */ }
+    if (!real.startsWith(realCwd + path.sep) && real !== realCwd) {
+      void onLog("stderr", `[openrouter adapter] WARNING: settingsFile '${raw}' resolves outside cwd — ignoring\n`);
+      return "";
+    }
+    return real;
+  })();
+
   const taskId =
     (typeof context.taskId === "string" && context.taskId.trim()) ||
     (typeof context.issueId === "string" && context.issueId.trim()) ||
@@ -1572,6 +1600,7 @@ export async function executeAgentLoop(
   // don't declare vision support, but the model-level check is a separate
   // question — not all providers expose vision for every model even when the
   // base weights support it.
+  let visionFallbackNote: string | null = null;
   if (promptContent !== null) {
     const visionOk = await checkVisionSupport(apiKey, effectiveModel);
     if (visionOk === false) {
@@ -1604,6 +1633,7 @@ export async function executeAgentLoop(
       if (fallbackModel) {
         const originalModel = effectiveModel;
         effectiveModel = fallbackModel;
+        visionFallbackNote = `vision fallback: ${originalModel} → ${fallbackModel}`;
         // Recompute timeout for the new model (only matters when not explicitly set).
         timeoutSec = Math.max(0, safeNumber(config.timeoutSec, defaultTimeoutForModel(effectiveModel)));
         structuredLog({
@@ -1618,6 +1648,11 @@ export async function executeAgentLoop(
       } else {
         // No working fallback found — either all candidates lack vision or
         // the user explicitly disabled the fallback chain with [].
+        if (fallbackExplicitlyDisabled) {
+          visionFallbackNote = "vision fallback disabled (visionFallbackModels: [])";
+        } else {
+          visionFallbackNote = "vision: no fallback available";
+        }
         structuredLog({
           level: "warn", ts: Date.now(), event: "vision_not_supported",
           agentId: agent.id, runId, model: effectiveModel,
@@ -1962,6 +1997,7 @@ export async function executeAgentLoop(
         ...(safeInstructionsFilePath
           ? [`instructions: ${safeInstructionsFilePath}`]
           : []),
+        ...(visionFallbackNote ? [visionFallbackNote] : []),
       ],
       env: redactEnvForLogs(env),
       prompt,

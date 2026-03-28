@@ -6,6 +6,9 @@
  * whenever the mock fetch is not configured or returns a non-ok status.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import {
   listOragerSessions,
   searchOragerSessions,
@@ -415,5 +418,82 @@ describe("concurrent session operations — no duplication or corruption (T14)",
     const gptIds = gptResults.sessions.map((s) => s.sessionId);
     const claudeIds = claudeResults.sessions.map((s) => s.sessionId);
     expect(gptIds).not.toEqual(claudeIds);
+  });
+});
+
+// ── G3: ORAGER_SESSIONS_DIR env override ─────────────────────────────────────
+// When ORAGER_SESSIONS_DIR is set, the adapter's filesystem fallback must read
+// from that directory — not the default ~/.orager/sessions/.
+
+describe("ORAGER_SESSIONS_DIR env override — filesystem fallback uses custom dir", () => {
+  let tmpDir: string;
+  const origEnv = process.env["ORAGER_SESSIONS_DIR"];
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "orager-sessions-test-"));
+    process.env["ORAGER_SESSIONS_DIR"] = tmpDir;
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("no daemon")));
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    if (origEnv === undefined) {
+      delete process.env["ORAGER_SESSIONS_DIR"];
+    } else {
+      process.env["ORAGER_SESSIONS_DIR"] = origEnv;
+    }
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it("listOragerSessions reads sessions from ORAGER_SESSIONS_DIR", async () => {
+    // Write a minimal session file into the custom dir
+    const session = {
+      sessionId: "sess-env-test",
+      model: "gpt-4o",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      turnCount: 2,
+      cwd: "/tmp/project",
+      trashed: false,
+    };
+    await fs.writeFile(
+      path.join(tmpDir, "sess-env-test.json"),
+      JSON.stringify(session),
+      { mode: 0o600 },
+    );
+
+    // No daemonUrl — goes straight to filesystem fallback
+    const result = await listOragerSessions({});
+
+    expect(result.sessions.some((s) => s.sessionId === "sess-env-test")).toBe(true);
+  });
+
+  it("getOragerSession finds a session in ORAGER_SESSIONS_DIR", async () => {
+    const session = {
+      sessionId: "sess-env-get",
+      model: "claude-3-5-sonnet",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      turnCount: 1,
+      cwd: "/tmp/project",
+      trashed: false,
+    };
+    await fs.writeFile(
+      path.join(tmpDir, "sess-env-get.json"),
+      JSON.stringify(session),
+    );
+
+    const result = await getOragerSession("sess-env-get");
+
+    expect(result).not.toBeNull();
+    expect(result?.sessionId).toBe("sess-env-get");
+    expect(result?.model).toBe("claude-3-5-sonnet");
+  });
+
+  it("listOragerSessions returns empty when ORAGER_SESSIONS_DIR exists but is empty", async () => {
+    // tmpDir exists but has no .json files
+    const result = await listOragerSessions({});
+    expect(result.sessions).toHaveLength(0);
+    expect(result.total).toBe(0);
   });
 });

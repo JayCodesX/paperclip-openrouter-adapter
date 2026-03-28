@@ -60,12 +60,16 @@ export interface SessionBrowserOptions {
 
 // ── Filesystem fallback ───────────────────────────────────────────────────────
 
-const SESSIONS_DIR = path.join(os.homedir(), ".orager", "sessions");
+// Re-evaluated on each use so that ORAGER_SESSIONS_DIR set after module import
+// (e.g. in tests or CI) is respected — mirrors orager's getSessionsDir().
+function getSessionsDir(): string {
+  return process.env["ORAGER_SESSIONS_DIR"] ?? path.join(os.homedir(), ".orager", "sessions");
+}
 
 async function listSessionsFromFilesystem(limit: number, offset: number): Promise<ListSessionsResult> {
   let entries: string[];
   try {
-    entries = await fs.readdir(SESSIONS_DIR);
+    entries = await fs.readdir(getSessionsDir());
   } catch {
     return { sessions: [], total: 0, limit, offset };
   }
@@ -78,7 +82,7 @@ async function listSessionsFromFilesystem(limit: number, offset: number): Promis
   const withMtimes = await Promise.all(
     sessionFiles.map(async (file) => {
       try {
-        const stat = await fs.stat(path.join(SESSIONS_DIR, file));
+        const stat = await fs.stat(path.join(getSessionsDir(), file));
         return { file, mtime: stat.mtimeMs };
       } catch {
         return { file, mtime: 0 };
@@ -93,7 +97,7 @@ async function listSessionsFromFilesystem(limit: number, offset: number): Promis
 
   for (const { file } of pageFiles) {
     try {
-      const raw = await fs.readFile(path.join(SESSIONS_DIR, file), "utf8");
+      const raw = await fs.readFile(path.join(getSessionsDir(), file), "utf8");
       const data = JSON.parse(raw) as {
         sessionId?: string;
         model?: string;
@@ -126,7 +130,7 @@ async function listSessionsFromFilesystem(limit: number, offset: number): Promis
 async function searchSessionsFromFilesystem(query: string, limit: number): Promise<SearchSessionsResult> {
   let entries: string[];
   try {
-    entries = await fs.readdir(SESSIONS_DIR);
+    entries = await fs.readdir(getSessionsDir());
   } catch {
     return { sessions: [], total: 0, query };
   }
@@ -137,7 +141,7 @@ async function searchSessionsFromFilesystem(query: string, limit: number): Promi
 
   for (const file of sessionFiles) {
     try {
-      const raw = await fs.readFile(path.join(SESSIONS_DIR, file), "utf8");
+      const raw = await fs.readFile(path.join(getSessionsDir(), file), "utf8");
       const data = JSON.parse(raw) as {
         sessionId?: string;
         model?: string;
@@ -262,7 +266,7 @@ export async function getOragerSession(
   try {
     // Validate sessionId to prevent path traversal (e.g. "../../etc/passwd")
     if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) return null;
-    const raw = await fs.readFile(path.join(SESSIONS_DIR, `${sessionId}.json`), "utf8");
+    const raw = await fs.readFile(path.join(getSessionsDir(), `${sessionId}.json`), "utf8");
     const data = JSON.parse(raw) as {
       sessionId?: string;
       model?: string;
