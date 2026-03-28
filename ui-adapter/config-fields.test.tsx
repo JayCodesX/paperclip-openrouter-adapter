@@ -422,4 +422,38 @@ describe("OpenRouterConfigFields", () => {
       expect(el.hasAttribute("open")).toBe(false);
     });
   });
+
+  // 13. memoryRetrieval select renders with "local" and "embedding" options
+  it("memoryRetrieval: select renders with 'local' and 'embedding' options", () => {
+    render(<OpenRouterConfigFields {...makeProps()} />);
+
+    const select = screen.getByRole("combobox", { name: /memory retrieval mode/i });
+    expect(select).toBeDefined();
+
+    const options = Array.from(select.querySelectorAll("option")).map((o) => o.value);
+    expect(options).toContain("local");
+    expect(options).toContain("embedding");
+  });
+
+  // 14. Changing memoryRetrieval to "embedding" calls set with correct value
+  it("memoryRetrieval: changing to 'embedding' calls set with correct value", () => {
+    const set = vi.fn();
+    render(<OpenRouterConfigFields {...makeProps({ set })} />);
+
+    const select = screen.getByRole("combobox", { name: /memory retrieval mode/i });
+    fireEvent.change(select, { target: { value: "embedding" } });
+
+    expect(set).toHaveBeenCalledWith({ memoryRetrieval: "embedding" });
+  });
+
+  // 15. memoryEmbeddingModel input commits correctly
+  it("memoryEmbeddingModel: input commits correctly", () => {
+    const set = vi.fn();
+    render(<OpenRouterConfigFields {...makeProps({ set })} />);
+
+    const input = screen.getByPlaceholderText("openai/text-embedding-3-small");
+    fireEvent.change(input, { target: { value: "openai/text-embedding-3-small" } });
+
+    expect(set).toHaveBeenCalledWith({ memoryEmbeddingModel: "openai/text-embedding-3-small" });
+  });
 });

@@ -1344,6 +1344,53 @@ export function OpenRouterConfigFields({
         }
       />
 
+      {/* ===== MEMORY ===== */}
+      <p className={sectionHeadingClass}>Memory</p>
+
+      <Field
+        label="Memory Retrieval Mode"
+        hint="local = term overlap (fast, no API cost). embedding = cosine similarity over cached vectors (more accurate, requires an embedding model)."
+      >
+        <select
+          aria-label="Memory Retrieval Mode"
+          className={selectClass}
+          value={
+            isCreate
+              ? (values!.memoryRetrieval as string) ?? "local"
+              : eff("adapterConfig", "memoryRetrieval", String(config.memoryRetrieval ?? "local"))
+          }
+          onChange={(e) =>
+            isCreate
+              ? set!({ memoryRetrieval: e.target.value || "local" })
+              : mark("adapterConfig", "memoryRetrieval", e.target.value || "local")
+          }
+        >
+          <option value="local">local — term overlap</option>
+          <option value="embedding">embedding — cosine similarity</option>
+        </select>
+      </Field>
+
+      <Field
+        label="Embedding Model"
+        hint="OpenRouter embedding model ID (e.g. openai/text-embedding-3-small). Only used when Memory Retrieval Mode is 'embedding'."
+      >
+        <DraftInput
+          value={
+            isCreate
+              ? String(values!.memoryEmbeddingModel ?? "")
+              : eff("adapterConfig", "memoryEmbeddingModel", String(config.memoryEmbeddingModel ?? ""))
+          }
+          onCommit={(v) =>
+            isCreate
+              ? set!({ memoryEmbeddingModel: v || undefined })
+              : mark("adapterConfig", "memoryEmbeddingModel", v || undefined)
+          }
+          immediate
+          className={inputClass}
+          placeholder="openai/text-embedding-3-small"
+        />
+      </Field>
+
       {/* ===== DEV / DEBUG ===== */}
       <p className={sectionHeadingClass}>Dev / debug</p>
 
