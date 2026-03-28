@@ -398,3 +398,48 @@ describe("buildOpenRouterConfig — maxTurns / timeoutSec / graceSec overrides",
     expect((config as Record<string, unknown>).graceSec).toBe(60);
   });
 });
+
+describe("buildOpenRouterConfig — memoryRetrieval", () => {
+  it("includes memoryRetrieval and memoryEmbeddingModel when retrieval is 'embedding' and model provided", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({
+        memoryRetrieval: "embedding",
+        memoryEmbeddingModel: "openai/text-embedding-3-small",
+      } as Parameters<typeof makeValues>[0]),
+    );
+    expect((config as Record<string, unknown>).memoryRetrieval).toBe("embedding");
+    expect((config as Record<string, unknown>).memoryEmbeddingModel).toBe("openai/text-embedding-3-small");
+  });
+
+  it("includes only memoryRetrieval when retrieval is 'embedding' but no model provided", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ memoryRetrieval: "embedding" } as Parameters<typeof makeValues>[0]),
+    );
+    expect((config as Record<string, unknown>).memoryRetrieval).toBe("embedding");
+    expect(Object.prototype.hasOwnProperty.call(config, "memoryEmbeddingModel")).toBe(false);
+  });
+
+  it("does not include memoryRetrieval or memoryEmbeddingModel when retrieval is 'local'", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ memoryRetrieval: "local" } as Parameters<typeof makeValues>[0]),
+    );
+    expect(Object.prototype.hasOwnProperty.call(config, "memoryRetrieval")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(config, "memoryEmbeddingModel")).toBe(false);
+  });
+
+  it("does not include memoryRetrieval or memoryEmbeddingModel when memoryRetrieval is absent", () => {
+    const config = buildOpenRouterConfig(makeValues());
+    expect(Object.prototype.hasOwnProperty.call(config, "memoryRetrieval")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(config, "memoryEmbeddingModel")).toBe(false);
+  });
+
+  it("does not include memoryEmbeddingModel when provided without memoryRetrieval: 'embedding'", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({
+        memoryEmbeddingModel: "openai/text-embedding-3-small",
+      } as Parameters<typeof makeValues>[0]),
+    );
+    expect(Object.prototype.hasOwnProperty.call(config, "memoryRetrieval")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(config, "memoryEmbeddingModel")).toBe(false);
+  });
+});

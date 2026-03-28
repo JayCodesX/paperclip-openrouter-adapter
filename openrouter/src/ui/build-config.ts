@@ -311,5 +311,13 @@ export function buildOpenRouterConfig(
     ac.graceSec = vc.graceSec;
   }
 
+  // ── Memory retrieval ──────────────────────────────────────────────────────
+  if (vc.memoryRetrieval === "embedding") {
+    ac.memoryRetrieval = "embedding";
+    if (typeof vc.memoryEmbeddingModel === "string" && vc.memoryEmbeddingModel.trim()) {
+      ac.memoryEmbeddingModel = vc.memoryEmbeddingModel.trim();
+    }
+  }
+
   return ac;
 }

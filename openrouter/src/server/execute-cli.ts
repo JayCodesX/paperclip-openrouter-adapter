@@ -659,6 +659,8 @@ interface DaemonRunOpts {
   requiredEnvVars?: string[];
   // ── Memory ──────────────────────────────────────────────────────────────
   memoryKey?: string;
+  memoryRetrieval?: string;
+  memoryEmbeddingModel?: string;
 }
 
 /**
@@ -1964,6 +1966,13 @@ export async function executeAgentLoop(
   if (requiredEnvVars.length > 0) configObj.requiredEnvVars = requiredEnvVars;
   configObj.memoryKey = buildMemoryKey(agent.id, workspaceRepoUrl);
 
+  const memoryRetrieval = asString(config.memoryRetrieval, "");
+  if (memoryRetrieval === "embedding") {
+    configObj.memoryRetrieval = "embedding";
+    const embModel = asString(config.memoryEmbeddingModel, "");
+    if (embModel) configObj.memoryEmbeddingModel = embModel;
+  }
+
   // Response format (JSON healing)
   const responseFormat = parseObject(config.responseFormat);
   if (typeof responseFormat.type === "string" && responseFormat.type) {
@@ -2311,6 +2320,12 @@ export async function executeAgentLoop(
         ...(apiKeyPool.length > 1 ? { apiKeys: apiKeyPool } : {}),
         ...(requiredEnvVars.length > 0 ? { requiredEnvVars } : {}),
         memoryKey: buildMemoryKey(agent.id, workspaceRepoUrl),
+        ...(asString(config.memoryRetrieval, "") === "embedding"
+          ? {
+              memoryRetrieval: "embedding" as const,
+              ...(asString(config.memoryEmbeddingModel, "") ? { memoryEmbeddingModel: asString(config.memoryEmbeddingModel, "") } : {}),
+            }
+          : {}),
       };
 
       const daemonResult = await executeViaDaemon(
