@@ -2015,13 +2015,37 @@ export async function executeAgentLoop(
     };
   }
 
-  // Security: block dangerous flags that could bypass all tool approval gates.
-  // WARNING: this must stay in sync with the orager CLI flag names.
+  // Security: block dangerous flags that could bypass security controls, override
+  // adapter config, or change the process mode. Must stay in sync with orager CLI
+  // flag names. Categories:
+  //   • Security bypass:   --dangerously-skip-permissions
+  //   • Config override:   --config-file, --settings-file
+  //   • Daemon/proc mode:  --serve, --port, --max-concurrent, --idle-timeout, --allowed-cwd
+  //   • Subcommands:       --status, --sessions, --list-sessions, --search-sessions,
+  //                        --trash-session, --restore-session, --delete-session,
+  //                        --delete-trashed, --rollback-session, --prune-sessions,
+  //                        --rotate-key, --clear-model-cache
   const BLOCKED_EXTRA_ARGS = new Set([
     "--dangerously-skip-permissions",
+    "--config-file",
+    "--settings-file",
     "--serve",
     "--port",
-    "--config-file",  // prevent overriding our config file with an attacker-supplied one
+    "--max-concurrent",
+    "--idle-timeout",
+    "--allowed-cwd",
+    "--status",
+    "--sessions",
+    "--list-sessions",
+    "--search-sessions",
+    "--trash-session",
+    "--restore-session",
+    "--delete-session",
+    "--delete-trashed",
+    "--rollback-session",
+    "--prune-sessions",
+    "--rotate-key",
+    "--clear-model-cache",
   ]);
   // Also catch "--flag=value" variants (e.g. "--config-file=/tmp/evil").
   const blockedFound = extraArgs.filter((a) =>
