@@ -34,7 +34,11 @@ interface StructuredLogEntry {
   [key: string]: unknown;
 }
 
+// Test-only buffer — populated by _resetStateForTesting / drained by _drainStructuredLogForTesting.
+const _structuredLogBuffer: StructuredLogEntry[] = [];
+
 function structuredLog(entry: StructuredLogEntry): void {
+  _structuredLogBuffer.push(entry);
   if (!STRUCTURED_LOG_FILE) return;
   try {
     appendFileSync(STRUCTURED_LOG_FILE, JSON.stringify({ ...entry, ts: entry.ts }) + "\n");
@@ -45,12 +49,17 @@ function structuredLog(entry: StructuredLogEntry): void {
 // Module-level rolling window shared across all runs in this process.
 // Resets on process restart. Zero-cost runs (dry-run, free-tier) are excluded.
 const COST_WINDOW_SIZE = 20;
+// Minimum number of runs between anomaly alerts to prevent flooding onMeta/stderr
+// in batch workloads where every run is anomalous.
+const COST_ANOMALY_COOLDOWN_RUNS = 10;
 const _costWindow: number[] = [];
+let _runsSinceLastAnomaly = COST_ANOMALY_COOLDOWN_RUNS; // start ready to fire
 
 function recordRunCost(costUsd: number): void {
   if (costUsd <= 0) return;
   _costWindow.push(costUsd);
   if (_costWindow.length > COST_WINDOW_SIZE) _costWindow.shift();
+  _runsSinceLastAnomaly++;
 }
 
 function checkCostAnomaly(
@@ -60,6 +69,7 @@ function checkCostAnomaly(
   onLog: (stream: "stdout" | "stderr", line: string) => Promise<void> | void,
 ): void {
   if (_costWindow.length < 3) return;
+  if (_runsSinceLastAnomaly < COST_ANOMALY_COOLDOWN_RUNS) return; // cooldown active
   const avg = _costWindow.reduce((a, b) => a + b, 0) / _costWindow.length;
   if (avg > 0 && costUsd > avg * 2) {
     const multiplier = (costUsd / avg).toFixed(1);
@@ -77,6 +87,7 @@ function checkCostAnomaly(
       rollingAvgCostUsd: avg,
       windowSize: _costWindow.length,
     });
+    _runsSinceLastAnomaly = 0; // reset cooldown
   }
 }
 
@@ -95,7 +106,9 @@ function checkCostAnomaly(
 // Results are cached per model ID for 6 hours to avoid adding per-run latency.
 
 const _visionCache = new Map<string, { supported: boolean | null; ts: number }>();
-const _VISION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+export const VISION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+// Keep the old internal name as an alias so nothing inside the module needs updating
+const _VISION_CACHE_TTL_MS = VISION_CACHE_TTL_MS;
 
 export async function checkVisionSupport(apiKey: string, model: string): Promise<boolean | null> {
   const cached = _visionCache.get(model);
@@ -163,6 +176,16 @@ function buildApiKeyPool(config: Record<string, unknown>): { primary: string; po
 // Source: ~/Projects/orager/src/loop.ts — search for "starting fresh"
 export const SESSION_NOT_FOUND_MARKER = "not found, starting fresh";
 
+// ── Daemon auto-start rate limiter ────────────────────────────────────────
+// Prevents hammering the system with repeated daemon spawn attempts if the
+// daemon keeps failing to start. Allows at most one auto-start attempt per
+// 2 minutes across all requests in this process.
+let _lastAutoStartAttemptMs = 0;
+const AUTO_START_COOLDOWN_MS = (() => {
+  const v = parseInt(process.env["ORAGER_DAEMON_COOLDOWN_MS"] ?? "", 10);
+  return Number.isFinite(v) && v > 0 ? v : 2 * 60 * 1000; // default: 2 minutes
+})();
+
 // ── Daemon circuit breaker (per daemon URL) ────────────────────────────────
 // Tracks consecutive daemon failures per daemon URL. After DAEMON_CB_THRESHOLD
 // consecutive failures, that daemon is bypassed for DAEMON_CB_RESET_MS ms.
@@ -206,11 +229,12 @@ let _daemonKeyAgeWarningEmitted = false;
 
 async function readDaemonSigningKey(
   onLog?: (stream: "stdout" | "stderr", line: string) => Promise<void> | void,
+  keyPath = DAEMON_KEY_PATH,
 ): Promise<string | null> {
   try {
     const [key, stat] = await Promise.all([
-      fs.readFile(DAEMON_KEY_PATH, "utf8"),
-      fs.stat(DAEMON_KEY_PATH),
+      fs.readFile(keyPath, "utf8"),
+      fs.stat(keyPath),
     ]);
     const trimmed = key.trim();
     if (!trimmed) return null;
@@ -220,10 +244,10 @@ async function readDaemonSigningKey(
     if (stat.mode & 0o077) {
       const modeOctal = (stat.mode & 0o777).toString(8).padStart(3, "0");
       const msg =
-        `[openrouter adapter] WARNING: daemon signing key at ${DAEMON_KEY_PATH} has unsafe permissions (${modeOctal}). ` +
-        `Run: chmod 600 ${DAEMON_KEY_PATH}`;
+        `[openrouter adapter] WARNING: daemon signing key at ${keyPath} has unsafe permissions (${modeOctal}). ` +
+        `Run: chmod 600 ${keyPath}`;
       if (onLog) void onLog("stderr", msg + "\n");
-      structuredLog({ level: "warn", ts: Date.now(), event: "daemon_key_unsafe_permissions", keyPath: DAEMON_KEY_PATH, mode: modeOctal });
+      structuredLog({ level: "warn", ts: Date.now(), event: "daemon_key_unsafe_permissions", keyPath, mode: modeOctal });
     }
 
     const ageMs = Date.now() - stat.mtimeMs;
@@ -232,7 +256,7 @@ async function readDaemonSigningKey(
       const ageDays = Math.floor(ageMs / (24 * 60 * 60 * 1000));
       void onLog(
         "stderr",
-        `[openrouter adapter] WARNING: daemon signing key at ${DAEMON_KEY_PATH} is ${ageDays} days old. ` +
+        `[openrouter adapter] WARNING: daemon signing key at ${keyPath} is ${ageDays} days old. ` +
         `Consider rotating it (delete the file and restart the daemon to generate a new key).\n`,
       );
     }
@@ -268,8 +292,15 @@ async function tryAutoStartDaemon(
   apiKey: string,
   env: Record<string, string>,
   onLog: (stream: "stdout" | "stderr", line: string) => Promise<void> | void,
+  configAutoStart = false,
 ): Promise<boolean> {
-  if (process.env.ORAGER_DAEMON_AUTOSTART !== "true") return false;
+  // Allow auto-start via env var OR config field
+  if (process.env.ORAGER_DAEMON_AUTOSTART !== "true" && !configAutoStart) return false;
+
+  // Rate-limit: only attempt auto-start once per 2 minutes
+  const now = Date.now();
+  if (now - _lastAutoStartAttemptMs < AUTO_START_COOLDOWN_MS) return false;
+  _lastAutoStartAttemptMs = now;
 
   // Extract port from URL
   let port = 3456;
@@ -309,6 +340,16 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 // skills/ dir is at the root of the adapter package (two levels up from dist/server/)
 const SKILLS_DIR = path.resolve(__dirname, "..", "..", "skills");
+// Warn at load time if the bundled skills directory is missing — this can happen
+// when the package is loaded from an unexpected location (symlink, monorepo hoisting).
+// Non-fatal: addDirs will include a non-existent path, which orager silently ignores.
+fs.stat(SKILLS_DIR).then((s) => {
+  if (!s.isDirectory()) {
+    process.stderr.write(`[openrouter adapter] WARNING: bundled skills directory is not a directory: ${SKILLS_DIR}\n`);
+  }
+}).catch(() => {
+  process.stderr.write(`[openrouter adapter] WARNING: bundled skills directory not found: ${SKILLS_DIR} — Paperclip skills (get-task, post-comment, etc.) will not be available\n`);
+});
 import type {
   AdapterExecutionContext,
   AdapterExecutionResult,
@@ -326,6 +367,47 @@ import {
 // ── Local utility shims ───────────────────────────────────────────────────────
 // These mirror functions in newer versions of @paperclipai/adapter-utils that
 // may not yet be exported in the installed version.
+
+/**
+ * Return true if `host` is a loopback address (IPv4 127.x.x.x, IPv6 ::1,
+ * IPv6-mapped IPv4 loopback ::ffff:127.x.x.x / ::ffff:7f00:1, or "localhost").
+ * Used to block SSRF attacks that try to reach local services.
+ */
+function isLoopbackHost(host: string): boolean {
+  // Node.js URL.hostname returns bracketed IPv6 (e.g. "[::1]", "[::ffff:7f00:1]")
+  // Strip brackets to normalize before matching.
+  const h = host.toLowerCase().replace(/^\[|\]$/g, "");
+  return (
+    h === "localhost" ||
+    h === "127.0.0.1" ||
+    h === "::1" ||
+    h === "0.0.0.0" ||
+    /^127\./.test(h) ||
+    // IPv6-mapped IPv4 loopback: ::ffff:127.x.x.x or ::ffff:7f00:1
+    /^::ffff:127\./i.test(h) ||
+    h === "::ffff:7f00:1"
+  );
+}
+
+/**
+ * Validate that a string is a well-formed http/https URL.
+ * Returns the trimmed URL if valid, empty string if not.
+ * Used for siteUrl, siteName (informational headers), and webhookUrl (outbound POST)
+ * to prevent SSRF via misconfigured or attacker-controlled agent config.
+ */
+function validateHttpUrl(raw: string, fieldName: string): string {
+  if (!raw) return "";
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return "";
+    return raw;
+  } catch {
+    process.stderr.write(
+      `[openrouter adapter] WARNING: config.${fieldName} '${raw.slice(0, 100)}' is not a valid URL — ignoring\n`,
+    );
+    return "";
+  }
+}
 
 /**
  * Wrap asNumber to reject NaN and Infinity, falling back to `defaultVal`.
@@ -501,15 +583,21 @@ async function executeViaDaemon(
   }
 
   if (response.status === 503) {
-    // Respect Retry-After header (max 30s wait) then retry the daemon once.
+    // Respect Retry-After header then retry the daemon once.
     // If still saturated after the retry, return null to trigger spawn fallback (#1).
     const retryAfterSec = Math.min(
       Math.max(parseInt(response.headers.get("Retry-After") ?? "5", 10) || 5, 1),
       30,
     );
-    structuredLog({ level: "warn", ts: Date.now(), event: "daemon_retry", agentId, runId: "", message: `Daemon at capacity, retrying in ${retryAfterSec}s` });
-    void onLog("stderr", `[openrouter adapter] daemon at capacity — retrying in ${retryAfterSec}s\n`);
-    await new Promise<void>((r) => setTimeout(r, Math.min(retryAfterSec * 1000, 4 * 60 * 1000)));
+    // Cap wait to half of timeoutSec so we never wait longer than the run budget.
+    // Without this cap, a 30s Retry-After combined with a 60s timeout would cause
+    // the second fetch's AbortSignal.timeout() to fire mid-wait, masking a timeout
+    // as a silent spawn fallback.
+    const maxWaitMs = timeoutSec > 0 ? Math.max(Math.floor((timeoutSec * 1000) / 2), 1000) : 30_000;
+    const waitMs = Math.min(retryAfterSec * 1000, maxWaitMs);
+    structuredLog({ level: "warn", ts: Date.now(), event: "daemon_retry", agentId, runId: "", message: `Daemon at capacity, retrying in ${Math.round(waitMs / 1000)}s` });
+    void onLog("stderr", `[openrouter adapter] daemon at capacity — retrying in ${Math.round(waitMs / 1000)}s\n`);
+    await new Promise<void>((r) => setTimeout(r, waitMs));
     // Retry with a fresh token (original may expire if wait was long)
     const retryToken = mintDaemonJwt(signingKey, agentId);
     try {
@@ -522,12 +610,69 @@ async function executeViaDaemon(
         body: JSON.stringify({ prompt, promptContent: promptContent ?? undefined, opts: daemonOpts }),
         signal: AbortSignal.timeout((timeoutSec + 10) * 1000),
       });
-    } catch {
-      // Retry network failure — fall back to spawn
+    } catch (retryErr) {
+      // For timeout/abort errors, surface as a structured error rather than
+      // silently falling back to spawn (which would start a second full run).
+      const isTimeout = retryErr instanceof Error && retryErr.name === "TimeoutError";
+      const isAbort = retryErr instanceof Error && retryErr.name === "AbortError";
+      if (isTimeout || isAbort) {
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: isTimeout,
+          errorMessage: `Daemon retry request ${isTimeout ? "timed out" : "was aborted"}`,
+          errorCode: isTimeout ? "timeout" : "daemon_error",
+        };
+      }
+      // Other network failure on retry — fall back to spawn
       return null;
     }
     if (response.status === 503) {
       // Still at capacity after retry — fall back to spawn
+      return null;
+    }
+  }
+
+  // 429 = rate-limited. Respect Retry-After header and retry once, then fall
+  // back to spawn. Unlike 503 (capacity), 429 means the API key is rate-limited;
+  // retrying quickly would just receive another 429.
+  if (response.status === 429) {
+    const retryAfterSec = Math.min(
+      Math.max(parseInt(response.headers.get("Retry-After") ?? "10", 10) || 10, 1),
+      60,
+    );
+    const maxWaitMs = timeoutSec > 0 ? Math.max(Math.floor((timeoutSec * 1000) / 2), 1000) : 60_000;
+    const waitMs = Math.min(retryAfterSec * 1000, maxWaitMs);
+    structuredLog({ level: "warn", ts: Date.now(), event: "daemon_rate_limited", agentId, runId: "", waitMs, message: `Daemon rate-limited (429), retrying in ${Math.round(waitMs / 1000)}s` });
+    void onLog("stderr", `[openrouter adapter] daemon rate-limited — retrying in ${Math.round(waitMs / 1000)}s\n`);
+    await new Promise<void>((r) => setTimeout(r, waitMs));
+    const retryToken = mintDaemonJwt(signingKey, agentId);
+    try {
+      response = await fetch(`${baseUrl}/run`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${retryToken}`,
+        },
+        body: JSON.stringify({ prompt, promptContent: promptContent ?? undefined, opts: daemonOpts }),
+        signal: AbortSignal.timeout((timeoutSec + 10) * 1000),
+      });
+    } catch (retryErr) {
+      const isTimeout = retryErr instanceof Error && retryErr.name === "TimeoutError";
+      const isAbort = retryErr instanceof Error && retryErr.name === "AbortError";
+      if (isTimeout || isAbort) {
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: isTimeout,
+          errorMessage: `Daemon retry request after 429 ${isTimeout ? "timed out" : "was aborted"}`,
+          errorCode: isTimeout ? "timeout" : "daemon_error",
+        };
+      }
+      return null;
+    }
+    if (response.status === 429) {
+      // Still rate-limited after retry — fall back to spawn
       return null;
     }
   }
@@ -574,86 +719,105 @@ async function executeViaDaemon(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    // Guard against a single massive line consuming unbounded memory
-    if (buffer.length > MAX_STREAM_BUFFER_BYTES) {
-      const nextNewline = buffer.indexOf("\n", MAX_STREAM_BUFFER_BYTES);
-      const discarded = nextNewline >= 0 ? buffer.slice(0, nextNewline) : buffer;
-      // Check if the oversized segment contains critical events before discarding
-      if (discarded.includes('"type":"result"') || discarded.includes('"type":"question"')) {
-        void onLog("stderr",
-          `[openrouter adapter] WARNING: oversized stream segment (~${discarded.length} bytes) may contain a result/question event — attempting to parse\n`
-        );
-        structuredLog({ level: "warn", ts: Date.now(), event: "daemon_oversized_segment_critical", agentId, segmentBytes: discarded.length, message: "Oversized segment contains result/question event — attempting recovery" });
-        // Try to extract and process the critical event from the oversized line
-        const criticalMatch = discarded.match(/\{"type":"(?:result|question)"[^\n]*/);
-        if (criticalMatch) {
-          try {
-            const event = JSON.parse(criticalMatch[0]) as Record<string, unknown>;
-            if (event.type === "result") resultEvent = event;
-          } catch {
-            // Parse failed — the result event is unrecoverable. Log so operators
-            // know the run will end with a synthesised error rather than silently.
-            structuredLog({ level: "error", ts: Date.now(), event: "daemon_oversized_segment_unrecoverable", agentId, segmentBytes: discarded.length, message: "Could not parse result event from oversized segment — run will end with synthesised error" });
-            void onLog("stderr", `[openrouter adapter] ERROR: could not parse result event from oversized segment (${discarded.length} bytes) — run result lost\n`);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // Guard against a single massive line consuming unbounded memory
+      if (buffer.length > MAX_STREAM_BUFFER_BYTES) {
+        const nextNewline = buffer.indexOf("\n", MAX_STREAM_BUFFER_BYTES);
+        const discarded = nextNewline >= 0 ? buffer.slice(0, nextNewline) : buffer;
+        // Check if the oversized segment contains critical events before discarding
+        if (discarded.includes('"type":"result"') || discarded.includes('"type":"question"')) {
+          void onLog("stderr",
+            `[openrouter adapter] WARNING: oversized stream segment (~${discarded.length} bytes) may contain a result/question event — attempting to parse\n`
+          );
+          structuredLog({ level: "warn", ts: Date.now(), event: "daemon_oversized_segment_critical", agentId, segmentBytes: discarded.length, message: "Oversized segment contains result/question event — attempting recovery" });
+          // Try to extract and process the critical event from the oversized line
+          const criticalMatch = discarded.match(/\{"type":"(?:result|question)"[^\n]*/);
+          if (criticalMatch) {
+            try {
+              const event = JSON.parse(criticalMatch[0]) as Record<string, unknown>;
+              if (event.type === "result") resultEvent = event;
+            } catch {
+              // Parse failed — the result event is unrecoverable. Log so operators
+              // know the run will end with a synthesised error rather than silently.
+              structuredLog({ level: "error", ts: Date.now(), event: "daemon_oversized_segment_unrecoverable", agentId, segmentBytes: discarded.length, message: "Could not parse result event from oversized segment — run will end with synthesised error" });
+              void onLog("stderr", `[openrouter adapter] ERROR: could not parse result event from oversized segment (${discarded.length} bytes) — run result lost\n`);
+            }
+          }
+        } else {
+          void onLog("stderr",
+            `[openrouter adapter] daemon stream segment exceeded ${MAX_STREAM_BUFFER_BYTES} bytes — discarding oversized segment\n`
+          );
+          structuredLog({ level: "warn", ts: Date.now(), event: "daemon_oversized_segment_discarded", agentId, segmentBytes: discarded.length });
+        }
+        // Skip forward to the next newline to resync the parser
+        buffer = nextNewline >= 0 ? buffer.slice(nextNewline + 1) : "";
+      }
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        void onLog("stdout", line + "\n");
+        try {
+          const event = JSON.parse(line) as Record<string, unknown>;
+          if (event.type === "system" && typeof event.session_id === "string") {
+            sessionId = event.session_id;
+            if (typeof event.model === "string") resolvedModel = event.model;
+          }
+          if (event.type === "warn" && typeof event.message === "string") {
+            void onLog("stderr", `[openrouter adapter] ${event.message}\n`);
+            // Detect silent session restart — orager emits this when the requested
+            // session isn't found on the daemon and it starts a fresh one instead.
+            if (event.message.includes(SESSION_NOT_FOUND_MARKER)) {
+              sessionLost = true;
+              structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId, runId: "", message: "Daemon session not found — started fresh" });
+            }
+          }
+          if (event.type === "result") resultEvent = event;
+          // Keep the first question event — if multiple are emitted, the first is the
+          // one awaiting a response; later ones arrive after the daemon has resumed.
+          if (event.type === "question" && !questionEvent) {
+            questionEvent = event as {
+              type: "question";
+              prompt: string;
+              choices: Array<{ key: string; label: string; description?: string }>;
+              toolCallId: string;
+              toolName: string;
+            };
+          }
+        } catch {
+          // Non-JSON lines are expected (blank lines, partial chunks) — only warn
+          // on lines that LOOK like JSON (start with '{') since those represent
+          // actual parse failures that could mask dropped result/question events.
+          if (line.trimStart().startsWith("{")) {
+            void onLog("stderr",
+              `[openrouter adapter] WARNING: failed to parse JSON event from daemon stream: ${line.slice(0, 200)}\n`,
+            );
+            // Also emit to structured log so parse failures are visible in
+            // operational dashboards, not just in the ephemeral stderr stream.
+            structuredLog({
+              level: "warn",
+              ts: Date.now(),
+              event: "daemon_stream_parse_error",
+              agentId,
+              linePreview: line.slice(0, 200),
+            });
           }
         }
-      } else {
-        void onLog("stderr",
-          `[openrouter adapter] daemon stream segment exceeded ${MAX_STREAM_BUFFER_BYTES} bytes — discarding oversized segment\n`
-        );
-        structuredLog({ level: "warn", ts: Date.now(), event: "daemon_oversized_segment_discarded", agentId, segmentBytes: discarded.length });
       }
-      // Skip forward to the next newline to resync the parser
-      buffer = nextNewline >= 0 ? buffer.slice(nextNewline + 1) : "";
     }
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      void onLog("stdout", line + "\n");
+    // flush
+    if (buffer.trim()) {
       try {
-        const event = JSON.parse(line) as Record<string, unknown>;
-        if (event.type === "system" && typeof event.session_id === "string") {
-          sessionId = event.session_id;
-          if (typeof event.model === "string") resolvedModel = event.model;
-        }
-        if (event.type === "warn" && typeof event.message === "string") {
-          void onLog("stderr", `[openrouter adapter] ${event.message}\n`);
-        }
+        const event = JSON.parse(buffer) as Record<string, unknown>;
         if (event.type === "result") resultEvent = event;
-        // Keep the first question event — if multiple are emitted, the first is the
-        // one awaiting a response; later ones arrive after the daemon has resumed.
-        if (event.type === "question" && !questionEvent) {
-          questionEvent = event as {
-            type: "question";
-            prompt: string;
-            choices: Array<{ key: string; label: string; description?: string }>;
-            toolCallId: string;
-            toolName: string;
-          };
-        }
-      } catch {
-        // Non-JSON lines are expected (blank lines, partial chunks) — only warn
-        // on lines that LOOK like JSON (start with '{') since those represent
-        // actual parse failures that could mask dropped result/question events.
-        if (line.trimStart().startsWith("{")) {
-          void onLog("stderr",
-            `[openrouter adapter] WARNING: failed to parse JSON event from daemon stream: ${line.slice(0, 200)}\n`,
-          );
-        }
-      }
+      } catch { /* ok */ }
     }
-  }
-  // flush
-  if (buffer.trim()) {
-    try {
-      const event = JSON.parse(buffer) as Record<string, unknown>;
-      if (event.type === "result") resultEvent = event;
-    } catch { /* ok */ }
+  } finally {
+    reader.cancel().catch(() => {});
   }
 
   if (!resultEvent) {
@@ -663,80 +827,158 @@ async function executeViaDaemon(
       signal: null,
       timedOut: false,
       errorMessage: "Daemon run ended without a result event",
+      errorCode: "no_result",
     };
   }
 
-  const subtype = typeof resultEvent.subtype === "string" ? resultEvent.subtype : "error";
-  const resultText = typeof resultEvent.result === "string" ? resultEvent.result : "";
-  const usageRaw = typeof resultEvent.usage === "object" && resultEvent.usage !== null
-    ? (resultEvent.usage as Record<string, unknown>) : null;
-  const hasCost = typeof resultEvent.total_cost_usd === "number";
-  if (!hasCost) {
+  const hasCostField = typeof resultEvent.total_cost_usd === "number";
+  if (!hasCostField) {
     void onLog("stderr", "[openrouter adapter] WARNING: result event missing total_cost_usd\n");
   }
-  const totalCostUsd = hasCost ? (resultEvent.total_cost_usd as number) : 0;
 
-  if (!sessionId && typeof resultEvent.session_id === "string") sessionId = resultEvent.session_id;
+  const builtResult = buildAdapterResult({
+    resultEvent,
+    sessionId,
+    resolvedModel,
+    sessionLost,
+    cwd: typeof daemonOpts.cwd === "string" ? daemonOpts.cwd : "",
+    workspaceId: null,
+    workspaceRepoUrl: null,
+    workspaceRepoRef: null,
+    exitCode: null,  // helper will compute it from subtype
+    signal: null,
+  });
 
-  if (maxCostUsdSoft !== undefined && totalCostUsd >= maxCostUsdSoft) {
-    structuredLog({ level: "warn", ts: Date.now(), event: "soft_cost_limit", agentId, runId: "", costUsd: totalCostUsd, message: `Run cost $${totalCostUsd.toFixed(4)} exceeded soft limit $${maxCostUsdSoft}` });
+  const daemonCostUsd = builtResult.costUsd ?? 0;
+  if (maxCostUsdSoft !== undefined && daemonCostUsd >= maxCostUsdSoft) {
+    structuredLog({ level: "warn", ts: Date.now(), event: "soft_cost_limit", agentId, runId: "", costUsd: daemonCostUsd, message: `Run cost $${daemonCostUsd.toFixed(4)} exceeded soft limit $${maxCostUsdSoft}` });
     void onLog(
       "stderr",
-      `[openrouter adapter] soft cost limit reached ($${totalCostUsd.toFixed(4)} >= $${maxCostUsdSoft}) — consider adjusting maxCostUsd\n`,
+      `[openrouter adapter] soft cost limit reached ($${daemonCostUsd.toFixed(4)} >= $${maxCostUsdSoft}) — consider adjusting maxCostUsd\n`,
     );
   }
 
-  const cacheHitRatio =
-    typeof usageRaw?.input_tokens === "number" && usageRaw.input_tokens > 0
-      ? (typeof usageRaw.cache_read_input_tokens === "number" ? usageRaw.cache_read_input_tokens : 0) / usageRaw.input_tokens
-      : 0;
-
-  const isSuccess = subtype === "success";
-  const isMaxTurns = subtype === "error_max_turns";
-  const softStop = isSuccess || isMaxTurns;
-  const clearSession = isMaxTurns || sessionLost;
-
-  const newSessionParams = sessionId
-    ? { oragerSessionId: sessionId, updatedAt: new Date().toISOString() }
-    : null;
-
   return {
-    exitCode: softStop ? 0 : 1,
-    signal: null,
-    timedOut: false,
-    errorMessage: softStop ? undefined : `Agent loop ended: ${subtype}${resultText ? ` — ${resultText}` : ""}`,
-    clearSession,
-    model: resolvedModel || undefined,
-    usage: usageRaw
-      ? {
-          inputTokens: typeof usageRaw.input_tokens === "number" ? usageRaw.input_tokens : 0,
-          outputTokens: typeof usageRaw.output_tokens === "number" ? usageRaw.output_tokens : 0,
-          cachedInputTokens: typeof usageRaw.cache_read_input_tokens === "number" ? usageRaw.cache_read_input_tokens : 0,
-        }
-      : undefined,
-    provider: "openrouter",
-    biller: "openrouter",
-    billingType: "api",
-    costUsd: totalCostUsd,
-    sessionParams: newSessionParams,
-    sessionDisplayId: sessionId || null,
-    summary: resultText,
-    resultJson: {
-      result: resultText,
-      subtype,
-      sessionId,
-      totalCostUsd,
-      cacheHitRatio: Math.round(cacheHitRatio * 100) / 100,
-      turnCount: typeof resultEvent.turnCount === "number" ? resultEvent.turnCount : undefined,
-    },
+    ...builtResult,
     question: questionEvent
       ? { prompt: questionEvent.prompt, choices: questionEvent.choices }
       : null,
   };
 }
 
+// ── Shared result builder ─────────────────────────────────────────────────────
+// Used by both the daemon path and the spawn path to assemble the final
+// AdapterExecutionResult from a parsed "result" event. Centralising the logic
+// here ensures the two paths stay in sync and reduces duplication.
+
+interface BuildAdapterResultOpts {
+  resultEvent: Record<string, unknown>;
+  sessionId: string;
+  resolvedModel: string;
+  sessionLost: boolean;
+  cwd: string;
+  workspaceId: string | null;
+  workspaceRepoUrl: string | null;
+  workspaceRepoRef: string | null;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+}
+
+function buildAdapterResult(opts: BuildAdapterResultOpts): AdapterExecutionResult {
+  const {
+    resultEvent, sessionId, resolvedModel, sessionLost,
+    cwd, workspaceId, workspaceRepoUrl, workspaceRepoRef,
+    exitCode, signal,
+  } = opts;
+
+  const subtype =
+    typeof resultEvent.subtype === "string" ? resultEvent.subtype : "error";
+  const resultText =
+    typeof resultEvent.result === "string" ? resultEvent.result : "";
+  const usageRaw =
+    typeof resultEvent.usage === "object" && resultEvent.usage !== null
+      ? (resultEvent.usage as Record<string, unknown>)
+      : null;
+  const hasCostField = typeof resultEvent.total_cost_usd === "number";
+  const totalCostUsd = hasCostField ? (resultEvent.total_cost_usd as number) : 0;
+
+  const effectiveSessionId =
+    sessionId || (typeof resultEvent.session_id === "string" ? resultEvent.session_id : "");
+
+  const isSuccess = subtype === "success";
+  const isMaxTurns = subtype === "error_max_turns";
+  const softStop = isSuccess || isMaxTurns;
+  const clearSession = isMaxTurns || sessionLost;
+
+  const cacheHitRatio =
+    typeof usageRaw?.input_tokens === "number" && usageRaw.input_tokens > 0
+      ? (typeof usageRaw.cache_read_input_tokens === "number"
+          ? usageRaw.cache_read_input_tokens
+          : 0) / usageRaw.input_tokens
+      : 0;
+
+  const newSessionParams = effectiveSessionId
+    ? {
+        oragerSessionId: effectiveSessionId,
+        cwd,
+        updatedAt: new Date().toISOString(),
+        ...(workspaceId ? { workspaceId } : {}),
+        ...(workspaceRepoUrl ? { repoUrl: workspaceRepoUrl } : {}),
+        ...(workspaceRepoRef ? { repoRef: workspaceRepoRef } : {}),
+      }
+    : null;
+
+  return {
+    exitCode: exitCode ?? (softStop ? 0 : 1),
+    signal,
+    timedOut: false,
+    errorMessage: softStop
+      ? undefined
+      : `Agent loop ended: ${subtype}${resultText ? ` — ${resultText}` : ""}`,
+    errorCode: softStop ? undefined : subtype,
+    clearSession,
+    model: resolvedModel || undefined,
+    usage: usageRaw
+      ? {
+          inputTokens:
+            typeof usageRaw.input_tokens === "number" ? usageRaw.input_tokens : 0,
+          outputTokens:
+            typeof usageRaw.output_tokens === "number" ? usageRaw.output_tokens : 0,
+          cachedInputTokens:
+            typeof usageRaw.cache_read_input_tokens === "number"
+              ? usageRaw.cache_read_input_tokens
+              : 0,
+        }
+      : undefined,
+    provider: "openrouter",
+    biller: "openrouter",
+    billingType: "api" as const,
+    costUsd: totalCostUsd,
+    sessionParams: newSessionParams,
+    sessionDisplayId: effectiveSessionId || null,
+    summary: resultText,
+    resultJson: {
+      result: resultText,
+      subtype,
+      sessionId: effectiveSessionId,
+      totalCostUsd,
+      cacheHitRatio: Math.round(cacheHitRatio * 100) / 100,
+      turnCount:
+        typeof resultEvent.turnCount === "number" ? resultEvent.turnCount : undefined,
+      filesChanged: Array.isArray(resultEvent.filesChanged)
+        ? (resultEvent.filesChanged as string[])
+        : undefined,
+      cacheWriteInputTokens:
+        typeof usageRaw?.cache_creation_input_tokens === "number"
+          ? usageRaw.cache_creation_input_tokens
+          : undefined,
+    },
+    question: null, // caller sets this if needed
+  };
+}
+
 const DEFAULT_CLI = "orager";
-const DEFAULT_MODEL = "deepseek/deepseek-chat-v3-0324";
+const DEFAULT_MODEL = "deepseek/deepseek-chat-v3-2";
 const DEFAULT_MAX_TURNS = 20;
 const DEFAULT_MAX_RETRIES = 3;
 // Ordered fallback chain tried when the configured model doesn't support vision.
@@ -814,13 +1056,14 @@ export async function executeAgentLoop(
     config.dangerouslySkipPermissions,
     false,
   );
-  const siteUrl = asString(config.siteUrl, "");
+  const siteUrl = validateHttpUrl(asString(config.siteUrl, ""), "siteUrl");
   const siteName = asString(config.siteName, "");
   const sandboxRoot = asString(config.sandboxRoot, "");
   const useFinishTool = asBoolean(config.useFinishTool, false);
   const profile = asString(config.profile, "").trim();
   const settingsFile = asString(config.settingsFile, "").trim();
   const forceResume = asBoolean(config.forceResume, false);
+  const daemonAutoStart = asBoolean(config.daemonAutoStart, false);
 
   // Sampling — reject NaN/Infinity for all sampling params
   const temperature =
@@ -930,11 +1173,16 @@ export async function executeAgentLoop(
         .join(",")
     : "";
 
-  // Cost limits
+  // Cost limits — must be positive if specified; zero/negative disables enforcement
+  // so a misconfigured value would silently turn off cost controls.
   const maxCostUsd =
-    typeof config.maxCostUsd === "number" ? config.maxCostUsd : undefined;
+    typeof config.maxCostUsd === "number" && config.maxCostUsd > 0
+      ? config.maxCostUsd
+      : undefined;
   const maxCostUsdSoft =
-    typeof config.maxCostUsdSoft === "number" ? config.maxCostUsdSoft : undefined;
+    typeof config.maxCostUsdSoft === "number" && config.maxCostUsdSoft > 0
+      ? config.maxCostUsdSoft
+      : undefined;
   const costPerInputToken =
     typeof config.costPerInputToken === "number"
       ? config.costPerInputToken
@@ -1001,10 +1249,25 @@ export async function executeAgentLoop(
     typeof config.summarizeFallbackKeep === "number" && config.summarizeFallbackKeep >= 0
       ? config.summarizeFallbackKeep
       : undefined;
-  const webhookUrl =
-    typeof config.webhookUrl === "string" && config.webhookUrl.trim()
-      ? config.webhookUrl.trim()
-      : undefined;
+  const webhookUrl = (() => {
+    const raw = typeof config.webhookUrl === "string" ? config.webhookUrl.trim() : "";
+    const validated = validateHttpUrl(raw, "webhookUrl");
+    if (validated) {
+      try {
+        const wu = new URL(validated);
+        if (isLoopbackHost(wu.hostname.toLowerCase())) {
+          void onLog(
+            "stderr",
+            `[openrouter adapter] WARNING: config.webhookUrl '${raw.slice(0, 100)}' points to loopback — loopback SSRF guard triggered, ignoring\n`,
+          );
+          return "";
+        }
+      } catch {
+        return "";
+      }
+    }
+    return validated || undefined;
+  })();
 
   // Extended agent loop options
   const tagToolOutputs =
@@ -1078,6 +1341,9 @@ export async function executeAgentLoop(
   }
 
   // Extra passthrough args (extraArgs or args alias)
+  // WARNING: extraArgs are passed verbatim to the orager CLI with no sanitisation.
+  // Including "--dangerously-skip-permissions" in extraArgs bypasses all tool
+  // approval gates. Do not expose this field to untrusted configuration sources.
   const extraArgs = (() => {
     const fromExtraArgs = asStringArray(config.extraArgs);
     if (fromExtraArgs.length > 0) return fromExtraArgs;
@@ -1182,8 +1448,16 @@ export async function executeAgentLoop(
       void onLog("stderr", `[openrouter adapter] WARNING: instructionsFilePath '${instructionsFilePath}' could not be resolved — ignoring\n`);
       return "";
     }
+    // Also realpath the cwd itself so the prefix check is correct on platforms
+    // where cwd may contain symlinks (e.g. macOS /tmp → /private/tmp).
+    let realCwd = cwd;
+    try {
+      realCwd = await fs.realpath(cwd);
+    } catch {
+      // cwd doesn't exist yet or isn't accessible — fall back to raw cwd
+    }
     // Must stay within cwd (prevent ../../etc/passwd traversal)
-    if (!real.startsWith(cwd + path.sep) && real !== cwd) {
+    if (!real.startsWith(realCwd + path.sep) && real !== realCwd) {
       void onLog("stderr", `[openrouter adapter] WARNING: instructionsFilePath '${instructionsFilePath}' is outside cwd — ignoring\n`);
       return "";
     }
@@ -1227,8 +1501,19 @@ export async function executeAgentLoop(
   // ── Session ────────────────────────────────────────────────────────────────
   const runtimeSessionParams = parseObject(runtime.sessionParams);
   const storedSessionId = asString(runtimeSessionParams.oragerSessionId, "");
+  const storedCwd = asString(runtimeSessionParams.cwd, "");
 
-  const previousSessionId = storedSessionId;
+  // Reject session resume if cwd changed (mirrors claude-local behavior).
+  // forceResume bypasses this check for intentional cross-cwd resumption.
+  const cwdMismatch = storedCwd && storedCwd !== cwd && !forceResume;
+  if (cwdMismatch) {
+    void onLog(
+      "stderr",
+      `[openrouter adapter] session ${storedSessionId} was created in '${storedCwd}' but current cwd is '${cwd}' — starting fresh (use forceResume: true to override)\n`,
+    );
+    structuredLog({ level: "warn", ts: Date.now(), event: "session_cwd_mismatch", agentId: agent.id, runId, storedCwd, currentCwd: cwd });
+  }
+  const previousSessionId = cwdMismatch ? "" : storedSessionId;
 
   // Only prepend bootstrap + handoff on the first run
   // (instructions go to --system-prompt-file, not the user message)
@@ -1248,13 +1533,21 @@ export async function executeAgentLoop(
     ? context.attachments
     : [];
   const imageAttachments = rawAttachments.filter(
-    (a): a is { url: string; mimeType?: string } =>
-      typeof a === "object" &&
-      a !== null &&
-      typeof (a as Record<string, unknown>).url === "string" &&
-      /^https?:\/\//.test((a as Record<string, unknown>).url as string) &&
-      (!(a as Record<string, unknown>).mimeType ||
-        /^image\//.test((a as Record<string, unknown>).mimeType as string)),
+    (a): a is { url: string; mimeType?: string } => {
+      if (typeof a !== "object" || a === null) return false;
+      const att = a as Record<string, unknown>;
+      if (typeof att.url !== "string") return false;
+      // Validate URL is well-formed http/https — catches malformed URLs like
+      // "https://[unterminated" that a simple regex would accept.
+      try {
+        const u = new URL(att.url);
+        if (u.protocol !== "https:" && u.protocol !== "http:") return false;
+      } catch {
+        return false;
+      }
+      if (att.mimeType !== undefined && (typeof att.mimeType !== "string" || !/^image\//.test(att.mimeType))) return false;
+      return true;
+    },
   );
 
   type ContentBlock =
@@ -1283,9 +1576,15 @@ export async function executeAgentLoop(
     const visionOk = await checkVisionSupport(apiKey, effectiveModel);
     if (visionOk === false) {
       // Model confirmed to not support vision. Try the fallback chain.
-      // visionFallbackModels: user-configurable list; [] disables fallback.
+      // visionFallbackModels controls the candidates:
+      //   • undefined/omitted → use DEFAULT_VISION_FALLBACK_MODELS
+      //   • []                → DISABLES fallback entirely (images sent as-is)
+      //   • ["model/id", …]   → use the provided list instead of the default
       // Default chain: Gemini 2.0 Flash → GPT-4o → Claude Sonnet — all
       // confirmed vision-capable on OpenRouter and ordered by cost/speed.
+      const fallbackExplicitlyDisabled =
+        Array.isArray(config.visionFallbackModels) &&
+        (config.visionFallbackModels as unknown[]).length === 0;
       const fallbackCandidates: string[] = Array.isArray(config.visionFallbackModels)
         ? (config.visionFallbackModels as unknown[]).filter(
             (m): m is string => typeof m === "string" && m.trim().length > 0,
@@ -1317,14 +1616,20 @@ export async function executeAgentLoop(
           `[openrouter adapter] model "${originalModel}" does not support image inputs — falling back to "${fallbackModel}".\n`,
         );
       } else {
-        // No working fallback found (or fallback disabled) — warn and proceed.
+        // No working fallback found — either all candidates lack vision or
+        // the user explicitly disabled the fallback chain with [].
         structuredLog({
           level: "warn", ts: Date.now(), event: "vision_not_supported",
           agentId: agent.id, runId, model: effectiveModel,
-          message: `Model "${effectiveModel}" does not support vision and no vision-capable fallback was available. Images may be silently stripped or cause an API error.`,
+          fallbackDisabled: fallbackExplicitlyDisabled,
+          message: fallbackExplicitlyDisabled
+            ? `Model "${effectiveModel}" does not support vision and visionFallbackModels is [] (fallback disabled). Images may be silently stripped or cause an API error.`
+            : `Model "${effectiveModel}" does not support vision and no vision-capable fallback was available. Images may be silently stripped or cause an API error.`,
         });
         void onLog("stderr",
-          `[openrouter adapter] WARNING: model "${effectiveModel}" does not support image inputs and no vision fallback was available — images may be silently stripped or cause an error.\n`,
+          fallbackExplicitlyDisabled
+            ? `[openrouter adapter] WARNING: model "${effectiveModel}" does not support image inputs and vision fallback is disabled (visionFallbackModels: []) — images may be silently stripped or cause an error.\n`
+            : `[openrouter adapter] WARNING: model "${effectiveModel}" does not support image inputs and no vision fallback was available — images may be silently stripped or cause an error.\n`,
         );
       }
     } else if (visionOk === null) {
@@ -1472,7 +1777,7 @@ export async function executeAgentLoop(
   try {
     // Create the file with mode 600 (owner read/write only) before writing content
     const fd = await fs.open(configFilePath, "w", 0o600);
-    await fd.write(JSON.stringify(configObj));
+    await fd.writeFile(JSON.stringify(configObj), "utf8");
     await fd.close();
     configFileWritten = true;
   } catch (err) {
@@ -1484,6 +1789,30 @@ export async function executeAgentLoop(
       signal: null,
       timedOut: false,
       errorMessage: `Failed to write orager config file: ${err instanceof Error ? err.message : String(err)}`,
+      errorCode: "config_error",
+    };
+  }
+
+  // Security: block dangerous flags that could bypass all tool approval gates.
+  // WARNING: this must stay in sync with the orager CLI flag names.
+  const BLOCKED_EXTRA_ARGS = new Set([
+    "--dangerously-skip-permissions",
+    "--serve",
+    "--port",
+    "--config-file",  // prevent overriding our config file with an attacker-supplied one
+  ]);
+  // Also catch "--flag=value" variants (e.g. "--config-file=/tmp/evil").
+  const blockedFound = extraArgs.filter((a) =>
+    [...BLOCKED_EXTRA_ARGS].some(flag => a === flag || a.startsWith(flag + "=")),
+  );
+  if (blockedFound.length > 0) {
+    structuredLog({ level: "error", ts: Date.now(), event: "blocked_extra_args", agentId: agent.id, runId, message: `config.extraArgs contains forbidden flags: ${blockedFound.join(", ")}` });
+    if (configFileWritten) await fs.unlink(configFilePath).catch(() => {});
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: `config.extraArgs contains forbidden flags: ${blockedFound.join(", ")}. These flags bypass security controls and are not permitted.`,
       errorCode: "config_error",
     };
   }
@@ -1588,6 +1917,8 @@ export async function executeAgentLoop(
   const missingVars = checkRequiredEnvVars(requiredEnvVars, effectiveEnv);
   if (missingVars.length > 0) {
     structuredLog({ level: "error", ts: Date.now(), event: "env_var_missing", agentId: agent.id, runId, message: `Missing: ${missingVars.join(", ")}` });
+    // Clean up the config file — orager will never run to delete it for us
+    if (configFileWritten) await fs.unlink(configFilePath).catch(() => {});
     return {
       exitCode: 1,
       signal: null,
@@ -1617,6 +1948,33 @@ export async function executeAgentLoop(
   const runStartMs = Date.now();
   structuredLog({ level: "info", ts: runStartMs, event: "run_start", agentId: agent.id, runId, model: effectiveModel });
 
+  // ── onMeta ─────────────────────────────────────────────────────────────────
+  if (onMeta) {
+    await onMeta({
+      adapterType: "openrouter-cli",
+      command: cliPath,
+      cwd,
+      commandArgs: args,
+      commandNotes: [
+        `model: ${effectiveModel}`,
+        `maxTurns: ${maxTurns}`,
+        previousSessionId ? `resume: ${previousSessionId}` : "new session",
+        ...(safeInstructionsFilePath
+          ? [`instructions: ${safeInstructionsFilePath}`]
+          : []),
+      ],
+      env: redactEnvForLogs(env),
+      prompt,
+      promptMetrics: {
+        promptChars: prompt.length,
+        bootstrapPromptChars: renderedBootstrap.length,
+        sessionHandoffChars: sessionHandoff.length,
+        heartbeatPromptChars: userMessage.length,
+      },
+      context,
+    });
+  }
+
   // ── Daemon fast-path ────────────────────────────────────────────────────────
   // If ORAGER_DAEMON_URL (or config.daemonUrl) is set, attempt to route this
   // run through the persistent orager daemon instead of spawning a subprocess.
@@ -1632,7 +1990,7 @@ export async function executeAgentLoop(
     try {
       const u = new URL(_rawDaemonUrl);
       const host = u.hostname.toLowerCase();
-      const isLoopback = host === "localhost" || host === "127.0.0.1" || host === "::1" || /^127\./.test(host);
+      const isLoopback = isLoopbackHost(host);
       if (!isLoopback) {
         void onLog("stderr", `[openrouter adapter] WARNING: ignoring non-loopback daemonUrl '${_rawDaemonUrl}' — daemon must be on localhost\n`);
         return "";
@@ -1649,14 +2007,15 @@ export async function executeAgentLoop(
       void onLog("stderr", `[openrouter adapter] daemon circuit breaker open — falling back to spawn\n`);
       structuredLog({ level: "warn", ts: Date.now(), event: "daemon_circuit_open", agentId: agent.id, runId });
     } else {
-    let signingKey = await readDaemonSigningKey(onLog);
+    const daemonKeyFilePath = asString(config.daemonKeyFile ?? config.daemonKeyPath, "").trim();
+    let signingKey = await readDaemonSigningKey(onLog, daemonKeyFilePath || undefined);
     let alive = signingKey ? await isDaemonAlive(daemonBaseUrl) : false;
 
     if (!alive) {
-      alive = await tryAutoStartDaemon(daemonBaseUrl, cliPath, apiKey, effectiveEnv, onLog);
+      alive = await tryAutoStartDaemon(daemonBaseUrl, cliPath, apiKey, effectiveEnv, onLog, daemonAutoStart);
       if (alive) {
         // Re-read signing key in case it was just generated
-        signingKey = await readDaemonSigningKey(onLog);
+        signingKey = await readDaemonSigningKey(onLog, daemonKeyFilePath || undefined);
       }
     }
 
@@ -1777,6 +2136,7 @@ export async function executeAgentLoop(
           inputTokens: daemonResult.usage?.inputTokens,
           outputTokens: daemonResult.usage?.outputTokens,
           cachedInputTokens: daemonResult.usage?.cachedInputTokens,
+          cacheWriteInputTokens: typeof (daemonResult.resultJson as Record<string, unknown> | undefined)?.cacheWriteInputTokens === "number" ? (daemonResult.resultJson as Record<string, unknown>).cacheWriteInputTokens as number : undefined,
           cacheHitRatio: typeof (daemonResult.resultJson as Record<string, unknown> | undefined)?.cacheHitRatio === "number" ? (daemonResult.resultJson as Record<string, unknown>).cacheHitRatio as number : undefined,
           costUsd: daemonResult.costUsd ?? undefined,
           turnCount: typeof (daemonResult.resultJson as Record<string, unknown> | undefined)?.turnCount === "number" ? (daemonResult.resultJson as Record<string, unknown>).turnCount as number : undefined,
@@ -1813,33 +2173,6 @@ export async function executeAgentLoop(
     } // end circuit-breaker else
   }
 
-  // ── onMeta ─────────────────────────────────────────────────────────────────
-  if (onMeta) {
-    await onMeta({
-      adapterType: "openrouter-cli",
-      command: cliPath,
-      cwd,
-      commandArgs: args,
-      commandNotes: [
-        `model: ${effectiveModel}`,
-        `maxTurns: ${maxTurns}`,
-        previousSessionId ? `resume: ${previousSessionId}` : "new session",
-        ...(safeInstructionsFilePath
-          ? [`instructions: ${safeInstructionsFilePath}`]
-          : []),
-      ],
-      env: redactEnvForLogs(env),
-      prompt,
-      promptMetrics: {
-        promptChars: prompt.length,
-        bootstrapPromptChars: renderedBootstrap.length,
-        sessionHandoffChars: sessionHandoff.length,
-        heartbeatPromptChars: userMessage.length,
-      },
-      context,
-    });
-  }
-
   // ── Validate command before spawning ───────────────────────────────────────
   try {
     await ensureCommandResolvable(cliPath, cwd, effectiveEnv);
@@ -1870,6 +2203,12 @@ export async function executeAgentLoop(
   // its own timeout fires. The alternative (keeping Node alive) is worse for
   // Paperclip availability. The timeout + grace SIGKILL is the cleanup path.
   return new Promise<AdapterExecutionResult>((resolve) => {
+    let settled = false;
+    function settle(r: AdapterExecutionResult): void {
+      if (settled) return;
+      settled = true;
+      resolve(r);
+    }
     let proc: ReturnType<typeof spawn>;
     try {
       proc = spawn(cliPath, args, {
@@ -1882,7 +2221,7 @@ export async function executeAgentLoop(
     } catch (spawnErr) {
       // Clean up the config file on spawn failure — orager won't get to delete it
       fs.unlink(configFilePath).catch(() => {});
-      resolve({
+      settle({
         exitCode: 1,
         signal: null,
         timedOut: false,
@@ -1896,8 +2235,9 @@ export async function executeAgentLoop(
     try {
       proc.stdin?.write(prompt, "utf8");
       proc.stdin?.end();
-    } catch {
-      // stdin write failure is non-fatal; the process may still produce output
+    } catch (stdinErr) {
+      // stdin write failure (e.g. EPIPE) — log so operators can diagnose
+      void onLog("stderr", `[openrouter adapter] WARNING: stdin write failed (${stdinErr instanceof Error ? stdinErr.message : String(stdinErr)}) — orager may not have received the prompt\n`);
     }
 
     let resultEvent: Record<string, unknown> | null = null;
@@ -1920,7 +2260,11 @@ export async function executeAgentLoop(
         timedOut = true;
         // Kill the entire process group to clean up orager subprocesses
         try {
-          process.kill(-(proc.pid!), "SIGTERM");
+          if (proc.pid != null) {
+            process.kill(-proc.pid, "SIGTERM");
+          } else {
+            proc.kill("SIGTERM");
+          }
         } catch {
           proc.kill("SIGTERM");
         }
@@ -1928,7 +2272,11 @@ export async function executeAgentLoop(
         if (graceSec > 0) {
           graceTimer = setTimeout(() => {
             try {
-              process.kill(-(proc.pid!), "SIGKILL");
+              if (proc.pid != null) {
+                process.kill(-proc.pid, "SIGKILL");
+              } else {
+                proc.kill("SIGKILL");
+              }
             } catch {
               proc.kill("SIGKILL");
             }
@@ -1997,7 +2345,7 @@ export async function executeAgentLoop(
       void onLog("stderr", text);
     });
 
-    proc.on("close", (code, signal) => {
+    proc.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
       if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
       if (graceTimer !== undefined) clearTimeout(graceTimer);
 
@@ -2019,7 +2367,7 @@ export async function executeAgentLoop(
       }
 
       if (timedOut) {
-        resolve({
+        settle({
           exitCode: null,
           signal: "SIGTERM",
           timedOut: true,
@@ -2030,23 +2378,16 @@ export async function executeAgentLoop(
       }
 
       if (!resultEvent) {
-        resolve({
+        settle({
           exitCode: code ?? 1,
           signal: signal ?? null,
           timedOut: false,
           errorMessage: `orager exited without a result event (exit code ${code ?? "null"})`,
+          errorCode: "no_result",
         });
         return;
       }
 
-      const subtype =
-        typeof resultEvent.subtype === "string" ? resultEvent.subtype : "error";
-      const resultText =
-        typeof resultEvent.result === "string" ? resultEvent.result : "";
-      const usageRaw =
-        typeof resultEvent.usage === "object" && resultEvent.usage !== null
-          ? (resultEvent.usage as Record<string, unknown>)
-          : null;
       const hasCostField = typeof resultEvent.total_cost_usd === "number";
       if (!hasCostField) {
         void onLog("stderr",
@@ -2061,93 +2402,37 @@ export async function executeAgentLoop(
           message: "result event missing total_cost_usd field",
         });
       }
-      const totalCostUsd = hasCostField ? (resultEvent.total_cost_usd as number) : 0;
 
-      // Fall back to result event's session_id if not captured from init
-      if (!sessionId && typeof resultEvent.session_id === "string") {
-        sessionId = resultEvent.session_id;
-      }
+      const spawnResult = buildAdapterResult({
+        resultEvent,
+        sessionId,
+        resolvedModel,
+        sessionLost,
+        cwd,
+        workspaceId,
+        workspaceRepoUrl,
+        workspaceRepoRef,
+        exitCode: code,
+        signal: null,
+      });
 
-      if (maxCostUsdSoft !== undefined && totalCostUsd >= maxCostUsdSoft) {
-        structuredLog({ level: "warn", ts: Date.now(), event: "soft_cost_limit", agentId: agent.id, runId, costUsd: totalCostUsd, message: `Run cost $${totalCostUsd.toFixed(4)} exceeded soft limit $${maxCostUsdSoft}` });
+      const spawnCostUsd = spawnResult.costUsd ?? 0;
+      if (maxCostUsdSoft !== undefined && spawnCostUsd >= maxCostUsdSoft) {
+        structuredLog({ level: "warn", ts: Date.now(), event: "soft_cost_limit", agentId: agent.id, runId, costUsd: spawnCostUsd, message: `Run cost $${spawnCostUsd.toFixed(4)} exceeded soft limit $${maxCostUsdSoft}` });
         void onLog(
           "stderr",
-          `[openrouter adapter] soft cost limit reached ($${totalCostUsd.toFixed(4)} >= $${maxCostUsdSoft}) — consider adjusting maxCostUsd\n`,
+          `[openrouter adapter] soft cost limit reached ($${spawnCostUsd.toFixed(4)} >= $${maxCostUsdSoft}) — consider adjusting maxCostUsd\n`,
         );
       }
 
-      const cacheHitRatio =
-        typeof usageRaw?.input_tokens === "number" && usageRaw.input_tokens > 0
-          ? (typeof usageRaw.cache_read_input_tokens === "number" ? usageRaw.cache_read_input_tokens : 0) / usageRaw.input_tokens
-          : 0;
-
-      const isSuccess = subtype === "success";
-      const isMaxTurns = subtype === "error_max_turns";
-      // error_max_turns is a soft stop — the run completed
-      // partially, the process exited cleanly, so we preserve exitCode 0 and
-      // clear the session so it won't be resumed.
-      const softStop = isSuccess || isMaxTurns;
-      // If orager started a fresh session because the previous one wasn't found,
-      // clear the session on Paperclip's side too so the next run is treated as
-      // first-run (instructions re-injected, bootstrap included).
-      const clearSession = isMaxTurns || sessionLost;
-
-      const newSessionParams = sessionId
-        ? {
-            oragerSessionId: sessionId,
-            updatedAt: new Date().toISOString(),
-            ...(workspaceId ? { workspaceId } : {}),
-            ...(workspaceRepoUrl ? { repoUrl: workspaceRepoUrl } : {}),
-            ...(workspaceRepoRef ? { repoRef: workspaceRepoRef } : {}),
-          }
-        : null;
-
-      const spawnResult = {
-        exitCode: code ?? (softStop ? 0 : 1),
-        signal: null,
-        timedOut: false,
-        errorMessage: softStop
-          ? undefined
-          : `Agent loop ended: ${subtype}${resultText ? ` — ${resultText}` : ""}`,
-        errorCode: softStop ? undefined : subtype,
-        clearSession,
-        model: resolvedModel || undefined,
-        usage: usageRaw
-          ? {
-              inputTokens:
-                typeof usageRaw.input_tokens === "number"
-                  ? usageRaw.input_tokens
-                  : 0,
-              outputTokens:
-                typeof usageRaw.output_tokens === "number"
-                  ? usageRaw.output_tokens
-                  : 0,
-              cachedInputTokens:
-                typeof usageRaw.cache_read_input_tokens === "number"
-                  ? usageRaw.cache_read_input_tokens
-                  : 0,
-            }
-          : undefined,
-        provider: "openrouter",
-        biller: "openrouter",
-        billingType: "api" as const,
-        costUsd: totalCostUsd,
-        sessionParams: newSessionParams,
-        sessionDisplayId: sessionId || null,
-        summary: resultText,
-        resultJson: {
-          result: resultText,
-          subtype,
-          sessionId,
-          totalCostUsd,
-          cacheHitRatio: Math.round(cacheHitRatio * 100) / 100,
-          turnCount: typeof resultEvent?.turnCount === "number" ? resultEvent.turnCount : undefined,
-          filesChanged: Array.isArray(resultEvent?.filesChanged) ? resultEvent.filesChanged as string[] : undefined,
-        },
+      // Apply question event
+      const finalResult: AdapterExecutionResult = {
+        ...spawnResult,
         question: questionEvent
           ? { prompt: questionEvent.prompt, choices: questionEvent.choices }
           : null,
       };
+
       structuredLog({
         level: "info",
         ts: Date.now(),
@@ -2160,21 +2445,22 @@ export async function executeAgentLoop(
         inputTokens: spawnResult.usage?.inputTokens,
         outputTokens: spawnResult.usage?.outputTokens,
         cachedInputTokens: spawnResult.usage?.cachedInputTokens,
+        cacheWriteInputTokens: typeof spawnResult.resultJson?.cacheWriteInputTokens === "number" ? spawnResult.resultJson.cacheWriteInputTokens : undefined,
         cacheHitRatio: typeof spawnResult.resultJson?.cacheHitRatio === "number" ? spawnResult.resultJson.cacheHitRatio : undefined,
-        costUsd: spawnResult.costUsd,
+        costUsd: spawnCostUsd,
         turnCount: typeof spawnResult.resultJson?.turnCount === "number" ? spawnResult.resultJson.turnCount : undefined,
         subtype: typeof spawnResult.resultJson?.subtype === "string" ? spawnResult.resultJson.subtype : undefined,
       });
       // Cost anomaly detection
-      recordRunCost(spawnResult.costUsd ?? 0);
-      checkCostAnomaly(spawnResult.costUsd ?? 0, agent.id, runId, onLog);
-      resolve(spawnResult);
+      recordRunCost(spawnCostUsd);
+      checkCostAnomaly(spawnCostUsd, agent.id, runId, onLog);
+      settle(finalResult);
     });
 
-    proc.on("error", (err) => {
+    proc.on("error", (err: Error) => {
       if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
       if (graceTimer !== undefined) clearTimeout(graceTimer);
-      resolve({
+      settle({
         exitCode: 1,
         signal: null,
         timedOut: false,
@@ -2188,9 +2474,17 @@ export async function executeAgentLoop(
 // ── Test helpers (exported for unit tests only) ───────────────────────────────
 export function _resetStateForTesting(): void {
   _costWindow.length = 0;
+  _runsSinceLastAnomaly = COST_ANOMALY_COOLDOWN_RUNS; // reset cooldown to "ready"
   _visionCache.clear();
   _daemonCircuitState.clear();
+  _lastAutoStartAttemptMs = 0;
+  _structuredLogBuffer.length = 0;
   _resetModelCacheForTesting();
+}
+
+/** Drain and return all structured log entries captured since the last reset. */
+export function _drainStructuredLogForTesting(): StructuredLogEntry[] {
+  return _structuredLogBuffer.splice(0);
 }
 export {
   buildApiKeyPool,
@@ -2204,4 +2498,37 @@ export {
   recordDaemonSuccess,
   DAEMON_CB_THRESHOLD,
   DAEMON_CB_RESET_MS,
+  buildAdapterResult,
+  _lastAutoStartAttemptMs,
+  AUTO_START_COOLDOWN_MS,
+  COST_ANOMALY_COOLDOWN_RUNS,
 };
+
+// ── Vision cache pre-warm ─────────────────────────────────────────────────
+// When the live model list is already populated (e.g. from a prior
+// listOpenRouterModels() call triggered by the UI dropdown), the vision
+// cache is filled for free. This background fetch ensures the cache is
+// warm for the first run even when the UI has not requested the model list.
+// Non-fatal: failures are silently ignored so they never affect a run.
+(async () => {
+  const apiKey = process.env.OPENROUTER_API_KEY ?? "";
+  if (!apiKey) return;
+  const base = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/$/, "");
+  try {
+    const res = await fetch(`${base}/models`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return;
+    const json = await res.json() as {
+      data?: Array<{ id: string; input_modalities?: string[]; architecture?: { input_modalities?: string[] } }>;
+    };
+    for (const entry of json.data ?? []) {
+      const modalities = entry.input_modalities ?? entry.architecture?.input_modalities ?? [];
+      const supported = modalities.includes("image");
+      _visionCache.set(entry.id, { supported, ts: Date.now() });
+    }
+  } catch {
+    // Never fail module load due to a pre-warm error
+  }
+})();

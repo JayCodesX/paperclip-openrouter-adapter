@@ -2,26 +2,26 @@ export const type = "openrouter";
 export const label = "OpenRouter (orager)";
 // Any valid OpenRouter model ID works. Full list at https://openrouter.ai/models
 export const models = [
-    // DeepSeek
-    { id: "deepseek/deepseek-chat-v3-0324", label: "DeepSeek V3.2 (0324)" },
-    { id: "deepseek/deepseek-chat-v3-0324:free", label: "DeepSeek V3.2 (free)" },
-    { id: "deepseek/deepseek-chat", label: "DeepSeek V3 (latest)" },
-    { id: "deepseek/deepseek-r1", label: "DeepSeek R1 (reasoning)" },
-    { id: "deepseek/deepseek-r1:free", label: "DeepSeek R1 (free, reasoning)" },
-    // Anthropic
-    { id: "anthropic/claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
-    { id: "anthropic/claude-sonnet-4-5", label: "Claude Sonnet 4.5" },
-    { id: "anthropic/claude-opus-4-6", label: "Claude Opus 4.6" },
-    { id: "anthropic/claude-haiku-4-5", label: "Claude Haiku 4.5" },
+    // DeepSeek — text only
+    { id: "deepseek/deepseek-chat-v3-0324", label: "DeepSeek V3.2 (0324)", supportsVision: false },
+    { id: "deepseek/deepseek-chat-v3-0324:free", label: "DeepSeek V3.2 (free)", supportsVision: false },
+    { id: "deepseek/deepseek-chat", label: "DeepSeek V3 (latest)", supportsVision: false },
+    { id: "deepseek/deepseek-r1", label: "DeepSeek R1 (reasoning)", supportsVision: false },
+    { id: "deepseek/deepseek-r1:free", label: "DeepSeek R1 (free, reasoning)", supportsVision: false },
+    // Anthropic — all Claude models support vision
+    { id: "anthropic/claude-sonnet-4-6", label: "Claude Sonnet 4.6", supportsVision: true },
+    { id: "anthropic/claude-sonnet-4-5", label: "Claude Sonnet 4.5", supportsVision: true },
+    { id: "anthropic/claude-opus-4-6", label: "Claude Opus 4.6", supportsVision: true },
+    { id: "anthropic/claude-haiku-4-5", label: "Claude Haiku 4.5", supportsVision: true },
     // OpenAI
-    { id: "openai/gpt-4o", label: "GPT-4o" },
-    { id: "openai/gpt-4o-mini", label: "GPT-4o Mini" },
-    { id: "openai/o3", label: "OpenAI o3 (reasoning)" },
-    // Google
-    { id: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro" },
-    { id: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash" },
-    // Meta
-    { id: "meta-llama/llama-3.3-70b-instruct", label: "Llama 3.3 70B" },
+    { id: "openai/gpt-4o", label: "GPT-4o", supportsVision: true },
+    { id: "openai/gpt-4o-mini", label: "GPT-4o Mini", supportsVision: true },
+    { id: "openai/o3", label: "OpenAI o3 (reasoning)", supportsVision: true },
+    // Google — all Gemini models support vision
+    { id: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro", supportsVision: true },
+    { id: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash", supportsVision: true },
+    // Meta — Llama 3.3 70B is text only
+    { id: "meta-llama/llama-3.3-70b-instruct", label: "Llama 3.3 70B", supportsVision: false },
 ];
 export const agentConfigurationDoc = `# openrouter agent configuration
 
@@ -67,7 +67,22 @@ Requires: orager installed and on PATH (npm install -g @paperclipai/orager)
 - useFinishTool (boolean, optional): The model calls a finish tool to signal completion.
 - requireApproval (boolean, optional): Require human approval before executing any tool.
 - sandboxRoot (string, optional): Restrict file operations to this directory.
-- extraArgs (string[], optional): Extra CLI arguments passed through to orager verbatim.
+- extraArgs (string[], optional): Extra CLI arguments passed through to orager verbatim. WARNING: passing "--dangerously-skip-permissions" here bypasses all tool approval gates — never expose this to untrusted config.
+
+## Wake-reason model routing
+- wakeReasonModels (object, optional): Map wake-reason → model ID. Overrides the base model for specific triggers.
+  Example: { "comment": "deepseek/deepseek-r1", "review": "openai/gpt-4o" }
+
+## MCP servers
+- mcpServers (object, optional): MCP server definitions passed to orager.
+  Example: { "myServer": { "command": "npx", "args": ["-y", "@my/mcp-server"] } }
+- requireMcpServers (string[], optional): MCP server names that must be available; run fails if any are missing.
+
+## Developer / operator
+- dryRun (boolean, optional): Log config and exit without making any API calls or spawning orager.
+- settingsFile (string, optional): Path to an alternative ~/.orager/settings.json file.
+- hookErrorMode ("ignore"|"warn"|"fail", optional): What to do when a hook script exits non-zero.
+- toolErrorBudgetHardStop (boolean, optional): Hard-stop the run when the tool error budget is exhausted.
 `;
 export const sessionCodec = {
     deserialize(raw) {
