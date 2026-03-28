@@ -331,5 +331,11 @@ export function buildOpenRouterConfig(
   // ── Approval mode ──────────────────────────────────────────────────────────
   if (vc.approvalMode === "question" || vc.approvalMode === "auto") ac.approvalMode = vc.approvalMode;
 
+  // ── Spawn depth ────────────────────────────────────────────────────────────
+  if (typeof vc.maxSpawnDepth === "number" && vc.maxSpawnDepth >= 0) ac.maxSpawnDepth = vc.maxSpawnDepth;
+
+  // ── Project instructions ──────────────────────────────────────────────────
+  if (typeof vc.readProjectInstructions === "boolean") ac.readProjectInstructions = vc.readProjectInstructions;
+
   return ac;
 }

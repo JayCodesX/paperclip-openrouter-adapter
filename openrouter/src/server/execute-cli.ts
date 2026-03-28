@@ -637,6 +637,7 @@ interface DaemonRunOpts {
   // ── Plan mode ───────────────────────────────────────────────────────────
   planMode?: string;
   // ── Context ─────────────────────────────────────────────────────────────
+  readProjectInstructions?: boolean;
   injectContext?: string;
   appendSystemPrompt?: string;
   promptContent?: Array<Record<string, unknown>>;
@@ -1429,6 +1430,8 @@ export async function executeAgentLoop(
     : undefined;
   const trackFileChanges = asBoolean(config.trackFileChanges, false);
   const enableBrowserTools = asBoolean(config.enableBrowserTools, false);
+  const readProjectInstructions =
+    typeof config.readProjectInstructions === "boolean" ? config.readProjectInstructions : undefined;
   const hookTimeoutMs =
     typeof config.hookTimeoutMs === "number" && config.hookTimeoutMs > 0
       ? config.hookTimeoutMs
@@ -1939,6 +1942,7 @@ export async function executeAgentLoop(
   if (Object.keys(bashPolicy).length > 0) configObj.bashPolicy = bashPolicy;
   if (trackFileChanges) configObj.trackFileChanges = true;
   if (enableBrowserTools) configObj.enableBrowserTools = true;
+  if (readProjectInstructions !== undefined) configObj.readProjectInstructions = readProjectInstructions;
   if (turnModelRules) configObj.turnModelRules = turnModelRules;
   if (summarizePrompt) configObj.summarizePrompt = summarizePrompt;
   if (summarizeFallbackKeep !== undefined) configObj.summarizeFallbackKeep = summarizeFallbackKeep;
@@ -2304,6 +2308,7 @@ export async function executeAgentLoop(
         bashPolicy: Object.keys(bashPolicy).length > 0 ? bashPolicy : undefined,
         trackFileChanges: trackFileChanges || undefined,
         enableBrowserTools: enableBrowserTools || undefined,
+        readProjectInstructions,
         turnModelRules,
         summarizePrompt,
         summarizeFallbackKeep,
