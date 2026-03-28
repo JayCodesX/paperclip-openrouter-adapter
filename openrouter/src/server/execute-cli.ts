@@ -537,6 +537,100 @@ function checkRequiredEnvVars(
 }
 
 /**
+ * Options sent to the orager daemon via POST /run.
+ * Mirrors orager's AgentLoopOptions (minus apiKey/onEmit/onLog which are daemon-side).
+ * Typed explicitly so TypeScript catches misspelled field names at the call site.
+ */
+interface DaemonRunOpts {
+  // ── Identity / session ──────────────────────────────────────────────────
+  apiKey?: string;
+  model?: string;
+  models?: string[];
+  sessionId?: string | null;
+  cwd?: string;
+  addDirs?: string[];
+  // ── Run control ─────────────────────────────────────────────────────────
+  maxTurns?: number;
+  maxRetries?: number;
+  verbose?: boolean;
+  forceResume?: boolean;
+  timeoutSec?: number;
+  useFinishTool?: boolean;
+  profile?: string;
+  settingsFile?: string;
+  // ── Sampling ────────────────────────────────────────────────────────────
+  temperature?: number;
+  top_p?: number;
+  top_k?: number;
+  frequency_penalty?: number;
+  presence_penalty?: number;
+  repetition_penalty?: number;
+  min_p?: number;
+  seed?: number;
+  stop?: string[];
+  parallel_tool_calls?: boolean;
+  tool_choice?: string | Record<string, unknown>;
+  response_format?: Record<string, unknown>;
+  // ── Model routing ───────────────────────────────────────────────────────
+  reasoning?: Record<string, unknown>;
+  provider?: Record<string, unknown>;
+  preset?: string;
+  transforms?: string[];
+  // ── Cost limits ─────────────────────────────────────────────────────────
+  maxCostUsd?: number;
+  maxCostUsdSoft?: number;
+  costPerInputToken?: number;
+  costPerOutputToken?: number;
+  // ── Site identity ───────────────────────────────────────────────────────
+  siteUrl?: string;
+  siteName?: string;
+  // ── Tool settings ───────────────────────────────────────────────────────
+  toolTimeouts?: Record<string, number>;
+  maxSpawnDepth?: number;
+  maxIdenticalToolCallTurns?: number;
+  toolErrorBudgetHardStop?: number | boolean;
+  enableBrowserTools?: boolean;
+  tagToolOutputs?: boolean;
+  trackFileChanges?: boolean;
+  // ── Security (daemon strips these) ──────────────────────────────────────
+  dangerouslySkipPermissions?: boolean;
+  sandboxRoot?: string;
+  bashPolicy?: Record<string, unknown>;
+  requireApproval?: string | boolean | Record<string, unknown>;
+  // ── Summarization ───────────────────────────────────────────────────────
+  summarizeAt?: number;
+  summarizeModel?: string;
+  summarizeKeepRecentTurns?: number;
+  summarizePrompt?: string;
+  summarizeFallbackKeep?: number;
+  // ── Plan mode ───────────────────────────────────────────────────────────
+  planMode?: string;
+  // ── Context ─────────────────────────────────────────────────────────────
+  injectContext?: string;
+  appendSystemPrompt?: string;
+  promptContent?: Array<Record<string, unknown>>;
+  // ── Approval ────────────────────────────────────────────────────────────
+  approvalMode?: string;
+  approvalAnswer?: string;
+  approvalTimeoutMs?: number;
+  // ── Turn routing ────────────────────────────────────────────────────────
+  turnModelRules?: unknown;
+  // ── Hooks ───────────────────────────────────────────────────────────────
+  hooks?: unknown;
+  hookTimeoutMs?: number;
+  hookErrorMode?: string;
+  webhookUrl?: string;
+  // ── MCP ─────────────────────────────────────────────────────────────────
+  mcpServers?: unknown;
+  requireMcpServers?: string[];
+  // ── API key pool ────────────────────────────────────────────────────────
+  apiKeys?: string[];
+  requiredEnvVars?: string[];
+  // ── Memory ──────────────────────────────────────────────────────────────
+  memoryKey?: string;
+}
+
+/**
  * Execute an agent run by POSTing to the orager daemon.
  * Returns the same AdapterExecutionResult shape as the spawn path.
  */
@@ -546,7 +640,7 @@ async function executeViaDaemon(
   agentId: string,
   prompt: string,
   promptContent: Array<{ type: string; [key: string]: unknown }> | null,
-  daemonOpts: Record<string, unknown>,
+  daemonOpts: DaemonRunOpts,
   timeoutSec: number,
   onLog: (stream: "stdout" | "stderr", line: string) => Promise<void> | void,
   maxCostUsdSoft?: number,
@@ -841,7 +935,7 @@ async function executeViaDaemon(
     sessionId,
     resolvedModel,
     sessionLost,
-    cwd: typeof daemonOpts.cwd === "string" ? daemonOpts.cwd : "",
+    cwd: daemonOpts.cwd ?? "",
     workspaceId: null,
     workspaceRepoUrl: null,
     workspaceRepoRef: null,
@@ -2057,7 +2151,7 @@ export async function executeAgentLoop(
 
     if (alive && signingKey) {
       // Build opts for daemon — includes apiKey so key rotation takes effect
-      const daemonOpts: Record<string, unknown> = {
+      const daemonOpts: DaemonRunOpts = {
         apiKey,
         model: effectiveModel,
         models: models.length > 0 ? models : undefined,
