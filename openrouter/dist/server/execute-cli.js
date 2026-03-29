@@ -8,6 +8,7 @@ import crypto from "node:crypto";
 import { mintDaemonJwt } from "./jwt-utils.js";
 import { getModelFromLiveCache, _resetModelCacheForTesting } from "./list-models.js";
 import { processRateLimitTracker } from "../rate-limit-tracker.js";
+import { buildOragerSkillsDir, cleanupOragerSkillsDir } from "./skills.js";
 // ── Structured logging ────────────────────────────────────────────────────────
 // When ORAGER_LOG_FILE is set, JSON structured log lines are appended to that
 // file in addition to the normal human-readable stderr output.
@@ -1157,9 +1158,21 @@ export async function executeAgentLoop(ctx) {
     const toolsFiles = Array.isArray(config.toolsFiles)
         ? config.toolsFiles.filter((f) => typeof f === "string")
         : [];
-    // Skills directories — always include bundled Paperclip skills so the
-    // model gets native get-task, post-comment, list-issues, update-issue-status tools
-    const addDirs = [SKILLS_DIR];
+    // Skills directories — build an ephemeral temp dir with symlinks to the desired
+    // Paperclip skills so they are dynamically injected per run (same pattern as
+    // claude_local). Falls back to the static bundled skills dir when no Paperclip
+    // skills directory is found.
+    const desiredSkillNames = Array.isArray(config.desiredSkills)
+        ? config.desiredSkills.filter((s) => typeof s === "string" && Boolean(s.trim()))
+        : [];
+    const ephemeralSkillsDir = await buildOragerSkillsDir(desiredSkillNames);
+    if (ephemeralSkillsDir) {
+        if (ephemeralSkillsDir.missing.length > 0) {
+            structuredLog({ level: "warn", ts: Date.now(), event: "skills_missing", agentId: agent.id, runId, message: `Desired skills not found: ${ephemeralSkillsDir.missing.join(", ")}` });
+        }
+        structuredLog({ level: "info", ts: Date.now(), event: "skills_linked", agentId: agent.id, runId, message: `Linked ${ephemeralSkillsDir.linked.length} skill(s) into ephemeral dir: ${ephemeralSkillsDir.linked.join(", ") || "(none)"}` });
+    }
+    const addDirs = ephemeralSkillsDir ? [ephemeralSkillsDir.dir] : [SKILLS_DIR];
     if (Array.isArray(config.addDirs)) {
         for (const d of config.addDirs) {
             if (typeof d === "string" && d.trim())
@@ -1698,6 +1711,8 @@ export async function executeAgentLoop(ctx) {
         // Config file write failed — fall back to individual CLI args is not
         // implemented; surface the error so the caller sees it rather than silently
         // proceeding with no config.
+        if (ephemeralSkillsDir)
+            await cleanupOragerSkillsDir(ephemeralSkillsDir.dir);
         return {
             exitCode: 1,
             signal: null,
@@ -1752,6 +1767,8 @@ export async function executeAgentLoop(ctx) {
         structuredLog({ level: "error", ts: Date.now(), event: "blocked_extra_args", agentId: agent.id, runId, message: `config.extraArgs contains forbidden flags: ${blockedFound.join(", ")}` });
         if (configFileWritten)
             await fs.unlink(configFilePath).catch(() => { });
+        if (ephemeralSkillsDir)
+            await cleanupOragerSkillsDir(ephemeralSkillsDir.dir);
         return {
             exitCode: 1,
             signal: null,
@@ -1859,6 +1876,8 @@ export async function executeAgentLoop(ctx) {
         // Clean up the config file — orager will never run to delete it for us
         if (configFileWritten)
             await fs.unlink(configFilePath).catch(() => { });
+        if (ephemeralSkillsDir)
+            await cleanupOragerSkillsDir(ephemeralSkillsDir.dir);
         return {
             exitCode: 1,
             signal: null,
@@ -1872,6 +1891,8 @@ export async function executeAgentLoop(ctx) {
         // Clean up the config file written above — no subprocess will delete it for us
         if (configFileWritten)
             await fs.unlink(configFilePath).catch(() => { });
+        if (ephemeralSkillsDir)
+            await cleanupOragerSkillsDir(ephemeralSkillsDir.dir);
         structuredLog({ level: "info", ts: Date.now(), event: "dry_run", agentId: agent.id, runId, model: effectiveModel });
         void onLog("stderr", "[openrouter adapter] DRY RUN — no API calls will be made\n");
         void onLog("stderr", `[openrouter adapter] model: ${effectiveModel}, session: ${previousSessionId || "new"}, cwd: ${cwd}\n`);
@@ -2089,6 +2110,8 @@ export async function executeAgentLoop(ctx) {
                     if (configFileWritten) {
                         await fs.unlink(configFilePath).catch(() => { });
                     }
+                    if (ephemeralSkillsDir)
+                        await cleanupOragerSkillsDir(ephemeralSkillsDir.dir);
                     // Augment session params with workspace metadata to match the spawn path
                     if (daemonResult.sessionParams) {
                         daemonResult.sessionParams = {
@@ -2164,8 +2187,10 @@ export async function executeAgentLoop(ctx) {
             proc.unref();
         }
         catch (spawnErr) {
-            // Clean up the config file on spawn failure — orager won't get to delete it
+            // Clean up temp files on spawn failure — orager won't get to delete them
             fs.unlink(configFilePath).catch(() => { });
+            if (ephemeralSkillsDir)
+                void cleanupOragerSkillsDir(ephemeralSkillsDir.dir);
             settle({
                 exitCode: 1,
                 signal: null,
@@ -2375,6 +2400,9 @@ export async function executeAgentLoop(ctx) {
             // Cost anomaly detection
             recordRunCost(spawnCostUsd);
             checkCostAnomaly(spawnCostUsd, agent.id, runId, onLog);
+            // Clean up ephemeral skills dir now that the run is complete
+            if (ephemeralSkillsDir)
+                void cleanupOragerSkillsDir(ephemeralSkillsDir.dir);
             settle(finalResult);
         });
         proc.on("error", (err) => {
