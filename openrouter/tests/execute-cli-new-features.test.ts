@@ -263,6 +263,49 @@ describe("session loss detection — daemon path", () => {
 
     expect(result.clearSession).toBe(true);
   });
+
+  it("sets clearSession=true when daemon emits structured warn subtype session_lost", async () => {
+    stubSigningKey(TEST_SIGNING_KEY);
+    const eventsWithStructuredSessionLost = [
+      { type: "warn", subtype: "session_lost", message: "session old-sess not found, starting fresh", session_id: "old-sess" },
+      { type: "system", session_id: "sess-new", model: "openai/gpt-4o" },
+      {
+        type: "result",
+        subtype: "success",
+        result: "Done",
+        session_id: "sess-new",
+        usage: { input_tokens: 5, output_tokens: 3, cache_read_input_tokens: 0 },
+        total_cost_usd: 0.0005,
+      },
+    ];
+    mockDaemon(eventsWithStructuredSessionLost);
+
+    const result = await executeAgentLoop({
+      ...baseArgs({
+        runtime: {
+          sessionId: "old-session-id",
+          sessionParams: {
+            oragerSessionId: "old-sess",
+            cwd: os.tmpdir(),
+            updatedAt: new Date().toISOString(),
+          },
+          sessionDisplayId: "old-sess",
+          taskKey: null,
+        },
+      }),
+      config: {
+        apiKey: "sk-test",
+        model: "openai/gpt-4o",
+        daemonUrl: "http://127.0.0.1:4000",
+        cwd: os.tmpdir(),
+        dangerouslySkipPermissions: true,
+      },
+      onLog: async () => {},
+      onMeta: async () => {},
+    } as Parameters<typeof executeAgentLoop>[0]);
+
+    expect(result.clearSession).toBe(true);
+  });
 });
 
 // ── cwd mismatch → log warning and use fresh session ────────────────────────
@@ -412,6 +455,49 @@ describe("errorCode no_result — spawn path", () => {
 
     await fs.unlink(scriptPath).catch(() => {});
     expect(result.errorCode).toBe("no_result");
+  });
+});
+
+// ── session loss detection — spawn path ─────────────────────────────────────
+
+describe("session loss detection — spawn path", () => {
+  it("sets clearSession=true when spawn stdout emits structured warn subtype session_lost", async () => {
+    const events = [
+      JSON.stringify({ type: "warn", subtype: "session_lost", message: "session old-sess not found, starting fresh", session_id: "old-sess" }),
+      JSON.stringify({ type: "system", session_id: "sess-new", model: "openai/gpt-4o" }),
+      JSON.stringify({ type: "result", subtype: "success", result: "Done", session_id: "sess-new", usage: { input_tokens: 5, output_tokens: 3, cache_read_input_tokens: 0 }, total_cost_usd: 0.0005 }),
+    ].join("\n");
+
+    const scriptPath = path.join(os.tmpdir(), "fake-orager-session-lost.sh");
+    await fs.writeFile(scriptPath, `#!/bin/sh\nprintf '${events.replace(/'/g, "'\\''")}\n'\nexit 0\n`);
+    await fs.chmod(scriptPath, 0o755);
+
+    const result = await executeAgentLoop({
+      ...baseArgs({
+        runtime: {
+          sessionId: "old-session-id",
+          sessionParams: {
+            oragerSessionId: "old-sess",
+            cwd: os.tmpdir(),
+            updatedAt: new Date().toISOString(),
+          },
+          sessionDisplayId: "old-sess",
+          taskKey: null,
+        },
+      }),
+      config: {
+        apiKey: "sk-test",
+        model: "openai/gpt-4o",
+        cwd: os.tmpdir(),
+        cliPath: scriptPath,
+        dangerouslySkipPermissions: true,
+      },
+      onLog: async () => {},
+      onMeta: async () => {},
+    } as Parameters<typeof executeAgentLoop>[0]);
+
+    await fs.unlink(scriptPath).catch(() => {});
+    expect(result.clearSession).toBe(true);
   });
 });
 
