@@ -1044,3 +1044,141 @@ describe("buildOpenRouterConfig — sampling parameters", () => {
     }
   });
 });
+
+// ── requireApproval / requireApprovalFor ──────────────────────────────────────
+
+describe("buildOpenRouterConfig — requireApproval and requireApprovalFor", () => {
+  type Cfg = Record<string, unknown>;
+
+  function cfg(overrides: Parameters<typeof makeValues>[0]): Cfg {
+    return buildOpenRouterConfig(makeValues(overrides)) as Cfg;
+  }
+
+  // requireApproval
+  it("requireApproval: true → config.requireApproval is true", () => {
+    expect(cfg({ requireApproval: true } as Parameters<typeof makeValues>[0]).requireApproval).toBe(true);
+  });
+
+  it("requireApproval: false → field absent (only set when truthy)", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ requireApproval: false } as Parameters<typeof makeValues>[0]), "requireApproval")).toBe(false);
+  });
+
+  it("requireApproval: absent → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({}), "requireApproval")).toBe(false);
+  });
+
+  // requireApprovalFor — string form
+  it("requireApprovalFor: non-empty trimmed string → config.requireApprovalFor set to trimmed string", () => {
+    expect(cfg({ requireApprovalFor: "  bash,write  " } as Parameters<typeof makeValues>[0]).requireApprovalFor).toBe("bash,write");
+  });
+
+  it("requireApprovalFor: whitespace-only string → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ requireApprovalFor: "   " } as Parameters<typeof makeValues>[0]), "requireApprovalFor")).toBe(false);
+  });
+
+  it("requireApprovalFor: empty string → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ requireApprovalFor: "" } as Parameters<typeof makeValues>[0]), "requireApprovalFor")).toBe(false);
+  });
+
+  // requireApprovalFor — array form
+  it("requireApprovalFor: non-empty array → config.requireApprovalFor set to array", () => {
+    expect(cfg({ requireApprovalFor: ["bash", "write"] } as Parameters<typeof makeValues>[0]).requireApprovalFor).toEqual(["bash", "write"]);
+  });
+
+  it("requireApprovalFor: empty array → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ requireApprovalFor: [] } as Parameters<typeof makeValues>[0]), "requireApprovalFor")).toBe(false);
+  });
+
+  // both together
+  it("requireApproval and requireApprovalFor together → both set", () => {
+    const c = cfg({ requireApproval: true, requireApprovalFor: ["bash"] } as Parameters<typeof makeValues>[0]);
+    expect(c.requireApproval).toBe(true);
+    expect(c.requireApprovalFor).toEqual(["bash"]);
+  });
+});
+
+// ── summarizeAt ───────────────────────────────────────────────────────────────
+
+describe("buildOpenRouterConfig — summarizeAt boundary", () => {
+  type Cfg = Record<string, unknown>;
+
+  function cfg(overrides: Parameters<typeof makeValues>[0]): Cfg {
+    return buildOpenRouterConfig(makeValues(overrides)) as Cfg;
+  }
+
+  it("summarizeAt: 0.5 → config.summarizeAt set", () => {
+    expect(cfg({ summarizeAt: 0.5 } as Parameters<typeof makeValues>[0]).summarizeAt).toBe(0.5);
+  });
+
+  it("summarizeAt: 1.0 (upper bound, inclusive) → config.summarizeAt set", () => {
+    expect(cfg({ summarizeAt: 1.0 } as Parameters<typeof makeValues>[0]).summarizeAt).toBe(1.0);
+  });
+
+  it("summarizeAt: 0 (lower bound, exclusive) → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ summarizeAt: 0 } as Parameters<typeof makeValues>[0]), "summarizeAt")).toBe(false);
+  });
+
+  it("summarizeAt: 1.1 (above upper bound) → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ summarizeAt: 1.1 } as Parameters<typeof makeValues>[0]), "summarizeAt")).toBe(false);
+  });
+
+  it("summarizeAt: -0.1 (negative) → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ summarizeAt: -0.1 } as Parameters<typeof makeValues>[0]), "summarizeAt")).toBe(false);
+  });
+
+  it("summarizeAt: absent → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({}), "summarizeAt")).toBe(false);
+  });
+});
+
+// ── summarizeModel ────────────────────────────────────────────────────────────
+
+describe("buildOpenRouterConfig — summarizeModel", () => {
+  type Cfg = Record<string, unknown>;
+
+  function cfg(overrides: Parameters<typeof makeValues>[0]): Cfg {
+    return buildOpenRouterConfig(makeValues(overrides)) as Cfg;
+  }
+
+  it("summarizeModel: non-empty trimmed string → config.summarizeModel set", () => {
+    expect(cfg({ summarizeModel: "  gpt-4o-mini  " } as Parameters<typeof makeValues>[0]).summarizeModel).toBe("gpt-4o-mini");
+  });
+
+  it("summarizeModel: empty string → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ summarizeModel: "" } as Parameters<typeof makeValues>[0]), "summarizeModel")).toBe(false);
+  });
+
+  it("summarizeModel: whitespace-only string → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ summarizeModel: "   " } as Parameters<typeof makeValues>[0]), "summarizeModel")).toBe(false);
+  });
+
+  it("summarizeModel: absent → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({}), "summarizeModel")).toBe(false);
+  });
+});
+
+// ── summarizeKeepRecentTurns ──────────────────────────────────────────────────
+
+describe("buildOpenRouterConfig — summarizeKeepRecentTurns", () => {
+  type Cfg = Record<string, unknown>;
+
+  function cfg(overrides: Parameters<typeof makeValues>[0]): Cfg {
+    return buildOpenRouterConfig(makeValues(overrides)) as Cfg;
+  }
+
+  it("summarizeKeepRecentTurns: 3 → config.summarizeKeepRecentTurns set", () => {
+    expect(cfg({ summarizeKeepRecentTurns: 3 } as Parameters<typeof makeValues>[0]).summarizeKeepRecentTurns).toBe(3);
+  });
+
+  it("summarizeKeepRecentTurns: 0 (boundary, >= 0 is valid) → config.summarizeKeepRecentTurns set", () => {
+    expect(cfg({ summarizeKeepRecentTurns: 0 } as Parameters<typeof makeValues>[0]).summarizeKeepRecentTurns).toBe(0);
+  });
+
+  it("summarizeKeepRecentTurns: -1 → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ summarizeKeepRecentTurns: -1 } as Parameters<typeof makeValues>[0]), "summarizeKeepRecentTurns")).toBe(false);
+  });
+
+  it("summarizeKeepRecentTurns: absent → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({}), "summarizeKeepRecentTurns")).toBe(false);
+  });
+});
