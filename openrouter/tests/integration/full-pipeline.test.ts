@@ -20,6 +20,7 @@
  */
 
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vitest";
+import { existsSync } from "node:fs";
 import http from "node:http";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -37,8 +38,20 @@ const __dirname = path.dirname(__filename);
 /** Path to the built orager dist entry. Used for the shell wrapper. */
 const ORAGER_DIST = path.resolve(__dirname, "../../../../orager/dist/index.js");
 
-/** Per-test timeout — spawning a Node.js process takes a few hundred ms. */
-const IT = 30_000;
+/**
+ * Skip all integration tests when the orager dist is absent (e.g. CI without
+ * a prior `npm run build` step, or fresh checkouts of this repo only).
+ * Run `npm run build` in the orager repo to enable these tests.
+ */
+const oragerDistExists = existsSync(ORAGER_DIST);
+
+/**
+ * Per-test timeout. Integration tests spawn a real Node.js process and may
+ * run several agent turns, so they need more headroom than unit tests.
+ * Multi-turn tests (tool calls, maxTurns, trackFileChanges) use IT_SLOW.
+ */
+const IT = 45_000;
+const IT_SLOW = 90_000;
 
 // ── SSE stream builders ───────────────────────────────────────────────────────
 
@@ -350,7 +363,7 @@ function logLines(onLog: ReturnType<typeof vi.fn>): string[] {
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("full pipeline — spawn path", () => {
+describe.skipIf(!oragerDistExists)("full pipeline — spawn path", () => {
 
   // ── Basic end-to-end ────────────────────────────────────────────────────────
 
@@ -430,7 +443,7 @@ describe("full pipeline — spawn path", () => {
     const turn2Messages = mockServer.completionCalls[1]?.body?.messages as Array<{ role: string }>;
     const hasToolMessage = turn2Messages?.some((m) => m.role === "tool");
     expect(hasToolMessage).toBe(true);
-  }, IT);
+  }, IT_SLOW);
 
   it("read_file tool: agent reads a real file in cwd and result reaches LLM", async () => {
     // Create a file the agent will read
@@ -453,7 +466,7 @@ describe("full pipeline — spawn path", () => {
     const toolMsg = turn2Messages?.find((m) => m.role === "tool");
     const toolContent = JSON.stringify(toolMsg?.content ?? "");
     expect(toolContent).toContain("integration-file-content-42");
-  }, IT);
+  }, IT_SLOW);
 
   // ── Adapter-level config features ──────────────────────────────────────────
 
@@ -624,7 +637,7 @@ describe("full pipeline — spawn path", () => {
     expect(result.clearSession).toBe(true);
     // Should not have made more requests than maxTurns allows
     expect(mockServer.completionCalls.length).toBeLessThanOrEqual(4);
-  }, IT);
+  }, IT_SLOW);
 
   it("timeoutSec: adapter kills orager process and returns timeout error", async () => {
     // The mock delays 10s — well past the 4s timeout
@@ -674,7 +687,7 @@ describe("full pipeline — spawn path", () => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("cost anomaly detection", () => {
+describe.skipIf(!oragerDistExists)("cost anomaly detection", () => {
 
   it("warns on stderr when run cost exceeds 2x rolling average", async () => {
     // Pre-populate cost window with cheap runs ($0.0001 each)
@@ -718,7 +731,7 @@ describe("cost anomaly detection", () => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("orager-level features (via spawn)", () => {
+describe.skipIf(!oragerDistExists)("orager-level features (via spawn)", () => {
 
   it("requiredEnvVars validated inside orager (spawn path belt-and-suspenders)", async () => {
     // The adapter checks requiredEnvVars before spawning.
@@ -778,7 +791,7 @@ describe("orager-level features (via spawn)", () => {
     const turn2Count = (mockServer.completionCalls[1]?.body?.messages as unknown[])?.length ?? 0;
     // Turn 2 must have more messages (added assistant + tool messages)
     expect(turn2Count).toBeGreaterThan(turn1Count);
-  }, IT);
+  }, IT_SLOW);
 
   // ── 5.1: spawn path crash with no result event ───────────────────────────────
 
@@ -875,13 +888,13 @@ describe("orager-level features (via spawn)", () => {
     const filesChanged = (result.resultJson?.filesChanged ?? []) as string[];
     expect(Array.isArray(filesChanged)).toBe(true);
     expect(filesChanged.some((f: string) => f.includes("track-test-"))).toBe(true);
-  }, IT);
+  }, IT_SLOW);
 
 });
 
 // ── 5.3: instructionsFilePath symlink traversal ───────────────────────────────
 
-describe("security: instructionsFilePath symlink traversal (via spawn)", () => {
+describe.skipIf(!oragerDistExists)("security: instructionsFilePath symlink traversal (via spawn)", () => {
 
   it("ignores instructionsFilePath that resolves outside cwd via symlink", async () => {
     // Create a symlink inside tmpDir → /etc/hosts (outside cwd).
@@ -911,7 +924,7 @@ describe("security: instructionsFilePath symlink traversal (via spawn)", () => {
 
 // ── 5.5: requiredEnvVars early return ─────────────────────────────────────────
 
-describe("requiredEnvVars config passthrough (via spawn)", () => {
+describe.skipIf(!oragerDistExists)("requiredEnvVars config passthrough (via spawn)", () => {
 
   it("passes requiredEnvVars to orager and run completes normally when var is present", async () => {
     // Set a env var in the spawned process's env and require it. The run should succeed.
@@ -935,7 +948,7 @@ describe("requiredEnvVars config passthrough (via spawn)", () => {
 
 // ── 5.7: oversized segment handling ──────────────────────────────────────────
 
-describe("oversized segment handling (via spawn)", () => {
+describe.skipIf(!oragerDistExists)("oversized segment handling (via spawn)", () => {
 
   it("logs a warning and continues when an orager stdout line exceeds 1 MB", async () => {
     // Return a completion with >1MB of content in a single delta so orager emits
