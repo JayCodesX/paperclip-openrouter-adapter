@@ -738,6 +738,7 @@ async function executeViaDaemon(
   baseUrl: string,
   signingKey: string,
   agentId: string,
+  runId: string,
   prompt: string,
   promptContent: Array<{ type: string; [key: string]: unknown }> | null,
   daemonOpts: DaemonRunOpts,
@@ -789,7 +790,7 @@ async function executeViaDaemon(
     // as a silent spawn fallback.
     const maxWaitMs = timeoutSec > 0 ? Math.max(Math.floor((timeoutSec * 1000) / 2), 1000) : 30_000;
     const waitMs = Math.min(retryAfterSec * 1000, maxWaitMs);
-    structuredLog({ level: "warn", ts: Date.now(), event: "daemon_retry", agentId, runId: "", message: `Daemon at capacity, retrying in ${Math.round(waitMs / 1000)}s` });
+    structuredLog({ level: "warn", ts: Date.now(), event: "daemon_retry", agentId, runId, message: `Daemon at capacity, retrying in ${Math.round(waitMs / 1000)}s` });
     void onLog("stderr", `[openrouter adapter] daemon at capacity — retrying in ${Math.round(waitMs / 1000)}s\n`);
     await new Promise<void>((r) => setTimeout(r, waitMs));
     // Retry with a fresh token (original may expire if wait was long)
@@ -841,7 +842,7 @@ async function executeViaDaemon(
     const waitMs = Math.min(retryAfterSec * 1000, maxWaitMs);
     processRateLimitTracker.recordRateLimit(waitMs);
     processRateLimitTracker.updateFromHeaders(response.headers);
-    structuredLog({ level: "warn", ts: Date.now(), event: "daemon_rate_limited", agentId, runId: "", waitMs, message: `Daemon rate-limited (429), retrying in ${Math.round(waitMs / 1000)}s` });
+    structuredLog({ level: "warn", ts: Date.now(), event: "daemon_rate_limited", agentId, runId, waitMs, message: `Daemon rate-limited (429), retrying in ${Math.round(waitMs / 1000)}s` });
     void onLog("stderr", `[openrouter adapter] daemon rate-limited — retrying in ${Math.round(waitMs / 1000)}s\n`);
     await new Promise<void>((r) => setTimeout(r, waitMs));
     const retryToken = mintDaemonJwt(signingKey, agentId);
@@ -961,7 +962,7 @@ async function executeViaDaemon(
         try {
           const event = JSON.parse(line) as Record<string, unknown>;
           processOragerEvent(event, streamState, onLog, () => {
-            structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId, runId: "", message: "Daemon session not found — started fresh" });
+            structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId, runId, message: "Daemon session not found — started fresh" });
           });
         } catch {
           // Non-JSON lines are expected (blank lines, partial chunks) — only warn
@@ -989,7 +990,7 @@ async function executeViaDaemon(
       try {
         const event = JSON.parse(buffer) as Record<string, unknown>;
         processOragerEvent(event, streamState, onLog, () => {
-          structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId, runId: "", message: "Daemon session not found — started fresh" });
+          structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId, runId, message: "Daemon session not found — started fresh" });
         });
       } catch { /* ok */ }
     }
@@ -1000,7 +1001,7 @@ async function executeViaDaemon(
   const { resultEvent, sessionId, resolvedModel, sessionLost, questionEvent } = streamState;
 
   if (!resultEvent) {
-    structuredLog({ level: "error", ts: Date.now(), event: "daemon_no_result", agentId, runId: "", message: "Daemon stream ended without a result event — daemon may have crashed or restarted" });
+    structuredLog({ level: "error", ts: Date.now(), event: "daemon_no_result", agentId, runId, message: "Daemon stream ended without a result event — daemon may have crashed or restarted" });
     return {
       exitCode: 1,
       signal: null,
@@ -1030,7 +1031,7 @@ async function executeViaDaemon(
 
   const daemonCostUsd = builtResult.costUsd ?? 0;
   if (maxCostUsdSoft !== undefined && daemonCostUsd >= maxCostUsdSoft) {
-    structuredLog({ level: "warn", ts: Date.now(), event: "soft_cost_limit", agentId, runId: "", costUsd: daemonCostUsd, message: `Run cost $${daemonCostUsd.toFixed(4)} exceeded soft limit $${maxCostUsdSoft}` });
+    structuredLog({ level: "warn", ts: Date.now(), event: "soft_cost_limit", agentId, runId, costUsd: daemonCostUsd, message: `Run cost $${daemonCostUsd.toFixed(4)} exceeded soft limit $${maxCostUsdSoft}` });
     void onLog(
       "stderr",
       `[openrouter adapter] soft cost limit reached ($${daemonCostUsd.toFixed(4)} >= $${maxCostUsdSoft}) — consider adjusting maxCostUsd\n`,
@@ -2481,6 +2482,7 @@ export async function executeAgentLoop(
         daemonBaseUrl,
         signingKey,
         effectiveAgentId,
+        runId,
         prompt,
         promptContent,
         daemonOpts,
