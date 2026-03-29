@@ -631,7 +631,7 @@ interface DaemonRunOpts {
   dangerouslySkipPermissions?: boolean;
   sandboxRoot?: string;
   bashPolicy?: Record<string, unknown>;
-  requireApproval?: string | boolean | Record<string, unknown>;
+  requireApproval?: "all" | string[] | boolean | Record<string, unknown>;
   // ── Summarization ───────────────────────────────────────────────────────
   summarizeAt?: number;
   summarizeModel?: string;
@@ -639,15 +639,15 @@ interface DaemonRunOpts {
   summarizePrompt?: string;
   summarizeFallbackKeep?: number;
   // ── Plan mode ───────────────────────────────────────────────────────────
-  planMode?: string;
+  planMode?: boolean;
   // ── Context ─────────────────────────────────────────────────────────────
   readProjectInstructions?: boolean;
-  injectContext?: string;
+  injectContext?: boolean;
   appendSystemPrompt?: string;
   promptContent?: Array<Record<string, unknown>>;
   // ── Approval ────────────────────────────────────────────────────────────
   approvalMode?: string;
-  approvalAnswer?: string;
+  approvalAnswer?: { choiceKey: string; toolCallId: string } | string | null;
   approvalTimeoutMs?: number;
   // ── Turn routing ────────────────────────────────────────────────────────
   turnModelRules?: unknown;
@@ -1864,139 +1864,150 @@ export async function executeAgentLoop(
   // length limits on some systems and keeps the subprocess invocation clean.
   // The file is chmod 600 before writing so only the current user can read it.
   // Orager reads and immediately deletes the file before doing anything else.
-  const configObj: Record<string, unknown> = {
-    outputFormat: "stream-json",
-    model: effectiveModel,
-    maxTurns: maxTurns > 0 ? maxTurns : undefined,
-    maxRetries,
-    addDirs,
+  //
+  // NB: buildConfigFilePayload and buildDaemonRunOpts (further below) are both
+  // closures over the variables extracted above. Keeping them as named local
+  // functions means adding a new field only requires one change per path, and
+  // makes the two parallel representations easy to diff against each other.
+  const buildConfigFilePayload = (): Record<string, unknown> => {
+    const obj: Record<string, unknown> = {
+      outputFormat: "stream-json",
+      model: effectiveModel,
+      maxTurns: maxTurns > 0 ? maxTurns : undefined,
+      maxRetries,
+      addDirs,
+    };
+
+    if (previousSessionId) obj.sessionId = previousSessionId;
+    if (safeInstructionsFilePath) obj.systemPromptFile = safeInstructionsFilePath;
+    if (dangerouslySkipPermissions) obj.dangerouslySkipPermissions = true;
+    if (sandboxRoot) obj.sandboxRoot = sandboxRoot;
+    if (useFinishTool) obj.useFinishTool = true;
+    if (profile) obj.profile = profile;
+    if (settingsFile) obj.settingsFile = settingsFile;
+    if (forceResume) obj.forceResume = true;
+    if (siteUrl) obj.siteUrl = siteUrl;
+    if (siteName) obj.siteName = siteName;
+
+    // Sampling
+    if (temperature !== undefined) obj.temperature = temperature;
+    if (top_p !== undefined) obj.top_p = top_p;
+    if (top_k !== undefined) obj.top_k = top_k;
+    if (frequency_penalty !== undefined) obj.frequency_penalty = frequency_penalty;
+    if (presence_penalty !== undefined) obj.presence_penalty = presence_penalty;
+    if (repetition_penalty !== undefined) obj.repetition_penalty = repetition_penalty;
+    if (min_p !== undefined) obj.min_p = min_p;
+    if (seed !== undefined) obj.seed = seed;
+    if (stopTokens.length > 0) obj.stop = stopTokens;
+
+    // Tool control
+    if (toolChoice) obj.tool_choice = toolChoice;
+    obj.parallel_tool_calls = parallelToolCalls;
+
+    // Reasoning
+    if (reasoningEffort) obj.reasoningEffort = reasoningEffort;
+    if (reasoningMaxTokens !== undefined) obj.reasoningMaxTokens = reasoningMaxTokens;
+    if (reasoningExclude) obj.reasoningExclude = true;
+
+    // Provider routing — pass as comma-separated strings (matching CLI format)
+    if (providerOrder) obj.providerOrder = providerOrder.split(",").filter(Boolean);
+    if (providerIgnore) obj.providerIgnore = providerIgnore.split(",").filter(Boolean);
+    if (providerOnly) obj.providerOnly = providerOnly.split(",").filter(Boolean);
+    if (dataCollection) obj.dataCollection = dataCollection;
+    if (zdr) obj.zdr = true;
+    if (sort) obj.sort = sort;
+    if (requireParameters) obj.require_parameters = true;
+    if (quantizations) obj.quantizations = quantizations.split(",").filter(Boolean);
+    if (preset) obj.preset = preset;
+
+    // Fallback models
+    if (models.length > 0) obj.models = models;
+
+    // Transforms
+    if (transforms) obj.transforms = transforms.split(",").filter(Boolean);
+
+    // Cost limits
+    if (maxCostUsd !== undefined) obj.maxCostUsd = maxCostUsd;
+    if (maxCostUsdSoft !== undefined) obj.maxCostUsdSoft = maxCostUsdSoft;
+    if (costPerInputToken !== undefined) obj.costPerInputToken = costPerInputToken;
+    if (costPerOutputToken !== undefined) obj.costPerOutputToken = costPerOutputToken;
+
+    // Approval — requireApproval must be "all" or string[], never a boolean
+    if (effectiveRequireApproval !== undefined) obj.requireApproval = effectiveRequireApproval;
+    obj.approvalMode = approvalMode;
+    if (approvalAnswer) obj.approvalAnswer = approvalAnswer;
+
+    // Extra tools
+    if (toolsFiles.length > 0) obj.toolsFiles = toolsFiles;
+
+    // Summarize config
+    if (summarizeAt !== undefined) obj.summarizeAt = summarizeAt;
+    if (summarizeModel) obj.summarizeModel = summarizeModel;
+    if (summarizeKeepRecentTurns !== undefined) obj.summarizeKeepRecentTurns = summarizeKeepRecentTurns;
+
+    // Extended agent loop options
+    if (tagToolOutputs !== undefined) obj.tagToolOutputs = tagToolOutputs;
+    if (planMode) obj.planMode = true;
+    if (injectContext) obj.injectContext = true;
+    if (Object.keys(bashPolicy).length > 0) obj.bashPolicy = bashPolicy;
+    if (trackFileChanges) obj.trackFileChanges = true;
+    if (enableBrowserTools) obj.enableBrowserTools = true;
+    if (readProjectInstructions !== undefined) obj.readProjectInstructions = readProjectInstructions;
+    if (turnModelRules) obj.turnModelRules = turnModelRules;
+    if (summarizePrompt) obj.summarizePrompt = summarizePrompt;
+    if (summarizeFallbackKeep !== undefined) obj.summarizeFallbackKeep = summarizeFallbackKeep;
+    if (webhookUrl) obj.webhookUrl = webhookUrl;
+    if (hooks) obj.hooks = hooks;
+    if (hookTimeoutMs !== undefined) obj.hookTimeoutMs = hookTimeoutMs;
+    if (hookErrorMode !== undefined) obj.hookErrorMode = hookErrorMode;
+    if (approvalTimeoutMs !== undefined) obj.approvalTimeoutMs = approvalTimeoutMs;
+    if (mcpServers) obj.mcpServers = mcpServers;
+    if (requireMcpServers && requireMcpServers.length > 0) obj.requireMcpServers = requireMcpServers;
+    if (toolTimeouts) obj.toolTimeouts = toolTimeouts;
+    if (maxSpawnDepth !== undefined) obj.maxSpawnDepth = maxSpawnDepth;
+    if (maxIdenticalToolCallTurns !== undefined) obj.maxIdenticalToolCallTurns = maxIdenticalToolCallTurns;
+    if (toolErrorBudgetHardStop) obj.toolErrorBudgetHardStop = true;
+
+    // Multimodal prompt content
+    if (promptContent) obj.promptContent = promptContent;
+
+    // Run-level timeout — orager self-terminates via AbortSignal.timeout() when exceeded.
+    // The adapter's outer process timeout (timeoutSec + 10s grace) remains as belt-and-suspenders.
+    obj.timeoutSec = timeoutSec;
+
+    // Full API key pool — orager rotates through these on 429 errors internally.
+    if (apiKeyPool.length > 1) obj.apiKeys = apiKeyPool;
+
+    // Required env vars — pass through so orager also validates (belt-and-suspenders
+    // for the spawn path; adapter-level check above handles daemon path).
+    if (requiredEnvVars.length > 0) obj.requiredEnvVars = requiredEnvVars;
+    obj.memoryKey = buildMemoryKey(agent.id, workspaceRepoUrl);
+
+    // Per-agent API key isolation
+    const _agentApiKey = asString(config.agentApiKey, "");
+    if (_agentApiKey.trim()) obj.agentApiKey = _agentApiKey.trim();
+
+    const _memoryRetrieval = asString(config.memoryRetrieval, "");
+    if (_memoryRetrieval === "embedding" || _memoryRetrieval === "fts" || _memoryRetrieval === "local") {
+      obj.memoryRetrieval = _memoryRetrieval;
+      if (_memoryRetrieval === "embedding") {
+        const embModel = asString(config.memoryEmbeddingModel, "");
+        if (embModel) obj.memoryEmbeddingModel = embModel;
+      }
+    }
+    const _memoryMaxChars = asNumber(config.memoryMaxChars, 0);
+    if (_memoryMaxChars > 0) obj.memoryMaxChars = _memoryMaxChars;
+
+    // Response format (JSON healing)
+    const _responseFormat = parseObject(config.responseFormat);
+    if (typeof _responseFormat.type === "string" && _responseFormat.type) {
+      obj.response_format = _responseFormat;
+    }
+
+    return obj;
   };
 
-  if (previousSessionId) configObj.sessionId = previousSessionId;
-  if (safeInstructionsFilePath) configObj.systemPromptFile = safeInstructionsFilePath;
-  if (dangerouslySkipPermissions) configObj.dangerouslySkipPermissions = true;
-  if (sandboxRoot) configObj.sandboxRoot = sandboxRoot;
-  if (useFinishTool) configObj.useFinishTool = true;
-  if (profile) configObj.profile = profile;
-  if (settingsFile) configObj.settingsFile = settingsFile;
-  if (forceResume) configObj.forceResume = true;
-  if (siteUrl) configObj.siteUrl = siteUrl;
-  if (siteName) configObj.siteName = siteName;
-
-  // Sampling
-  if (temperature !== undefined) configObj.temperature = temperature;
-  if (top_p !== undefined) configObj.top_p = top_p;
-  if (top_k !== undefined) configObj.top_k = top_k;
-  if (frequency_penalty !== undefined) configObj.frequency_penalty = frequency_penalty;
-  if (presence_penalty !== undefined) configObj.presence_penalty = presence_penalty;
-  if (repetition_penalty !== undefined) configObj.repetition_penalty = repetition_penalty;
-  if (min_p !== undefined) configObj.min_p = min_p;
-  if (seed !== undefined) configObj.seed = seed;
-  if (stopTokens.length > 0) configObj.stop = stopTokens;
-
-  // Tool control
-  if (toolChoice) configObj.tool_choice = toolChoice;
-  configObj.parallel_tool_calls = parallelToolCalls;
-
-  // Reasoning
-  if (reasoningEffort) configObj.reasoningEffort = reasoningEffort;
-  if (reasoningMaxTokens !== undefined) configObj.reasoningMaxTokens = reasoningMaxTokens;
-  if (reasoningExclude) configObj.reasoningExclude = true;
-
-  // Provider routing — pass as comma-separated strings (matching CLI format)
-  if (providerOrder) configObj.providerOrder = providerOrder.split(",").filter(Boolean);
-  if (providerIgnore) configObj.providerIgnore = providerIgnore.split(",").filter(Boolean);
-  if (providerOnly) configObj.providerOnly = providerOnly.split(",").filter(Boolean);
-  if (dataCollection) configObj.dataCollection = dataCollection;
-  if (zdr) configObj.zdr = true;
-  if (sort) configObj.sort = sort;
-  if (requireParameters) configObj.require_parameters = true;
-  if (quantizations) configObj.quantizations = quantizations.split(",").filter(Boolean);
-  if (preset) configObj.preset = preset;
-
-  // Fallback models
-  if (models.length > 0) configObj.models = models;
-
-  // Transforms
-  if (transforms) configObj.transforms = transforms.split(",").filter(Boolean);
-
-  // Cost limits
-  if (maxCostUsd !== undefined) configObj.maxCostUsd = maxCostUsd;
-  if (maxCostUsdSoft !== undefined) configObj.maxCostUsdSoft = maxCostUsdSoft;
-  if (costPerInputToken !== undefined) configObj.costPerInputToken = costPerInputToken;
-  if (costPerOutputToken !== undefined) configObj.costPerOutputToken = costPerOutputToken;
-
-  // Approval — requireApproval must be "all" or string[], never a boolean
-  if (effectiveRequireApproval !== undefined) configObj.requireApproval = effectiveRequireApproval;
-  configObj.approvalMode = approvalMode;
-  if (approvalAnswer) configObj.approvalAnswer = approvalAnswer;
-
-  // Extra tools
-  if (toolsFiles.length > 0) configObj.toolsFiles = toolsFiles;
-
-  // Summarize config
-  if (summarizeAt !== undefined) configObj.summarizeAt = summarizeAt;
-  if (summarizeModel) configObj.summarizeModel = summarizeModel;
-  if (summarizeKeepRecentTurns !== undefined) configObj.summarizeKeepRecentTurns = summarizeKeepRecentTurns;
-
-  // Extended agent loop options
-  if (tagToolOutputs !== undefined) configObj.tagToolOutputs = tagToolOutputs;
-  if (planMode) configObj.planMode = true;
-  if (injectContext) configObj.injectContext = true;
-  if (Object.keys(bashPolicy).length > 0) configObj.bashPolicy = bashPolicy;
-  if (trackFileChanges) configObj.trackFileChanges = true;
-  if (enableBrowserTools) configObj.enableBrowserTools = true;
-  if (readProjectInstructions !== undefined) configObj.readProjectInstructions = readProjectInstructions;
-  if (turnModelRules) configObj.turnModelRules = turnModelRules;
-  if (summarizePrompt) configObj.summarizePrompt = summarizePrompt;
-  if (summarizeFallbackKeep !== undefined) configObj.summarizeFallbackKeep = summarizeFallbackKeep;
-  if (webhookUrl) configObj.webhookUrl = webhookUrl;
-  if (hooks) configObj.hooks = hooks;
-  if (hookTimeoutMs !== undefined) configObj.hookTimeoutMs = hookTimeoutMs;
-  if (hookErrorMode !== undefined) configObj.hookErrorMode = hookErrorMode;
-  if (approvalTimeoutMs !== undefined) configObj.approvalTimeoutMs = approvalTimeoutMs;
-  if (mcpServers) configObj.mcpServers = mcpServers;
-  if (requireMcpServers && requireMcpServers.length > 0) configObj.requireMcpServers = requireMcpServers;
-  if (toolTimeouts) configObj.toolTimeouts = toolTimeouts;
-  if (maxSpawnDepth !== undefined) configObj.maxSpawnDepth = maxSpawnDepth;
-  if (maxIdenticalToolCallTurns !== undefined) configObj.maxIdenticalToolCallTurns = maxIdenticalToolCallTurns;
-  if (toolErrorBudgetHardStop) configObj.toolErrorBudgetHardStop = true;
-
-  // Multimodal prompt content
-  if (promptContent) configObj.promptContent = promptContent;
-
-  // Run-level timeout — orager self-terminates via AbortSignal.timeout() when exceeded.
-  // The adapter's outer process timeout (timeoutSec + 10s grace) remains as belt-and-suspenders.
-  configObj.timeoutSec = timeoutSec;
-
-  // Full API key pool — orager rotates through these on 429 errors internally.
-  if (apiKeyPool.length > 1) configObj.apiKeys = apiKeyPool;
-
-  // Required env vars — pass through so orager also validates (belt-and-suspenders
-  // for the spawn path; adapter-level check above handles daemon path).
-  if (requiredEnvVars.length > 0) configObj.requiredEnvVars = requiredEnvVars;
-  configObj.memoryKey = buildMemoryKey(agent.id, workspaceRepoUrl);
-
-  // Per-agent API key isolation
-  const agentApiKey = asString(config.agentApiKey, "");
-  if (agentApiKey.trim()) configObj.agentApiKey = agentApiKey.trim();
-
-  const memoryRetrieval = asString(config.memoryRetrieval, "");
-  if (memoryRetrieval === "embedding" || memoryRetrieval === "fts" || memoryRetrieval === "local") {
-    configObj.memoryRetrieval = memoryRetrieval;
-    if (memoryRetrieval === "embedding") {
-      const embModel = asString(config.memoryEmbeddingModel, "");
-      if (embModel) configObj.memoryEmbeddingModel = embModel;
-    }
-  }
-  const memoryMaxChars = asNumber(config.memoryMaxChars, 0);
-  if (memoryMaxChars > 0) configObj.memoryMaxChars = memoryMaxChars;
-
-  // Response format (JSON healing)
-  const responseFormat = parseObject(config.responseFormat);
-  if (typeof responseFormat.type === "string" && responseFormat.type) {
-    configObj.response_format = responseFormat;
-  }
+  const configObj = buildConfigFilePayload();
 
   // Write config to a crypto-random temp file, chmod 600 before writing content
   const configFileName = `orager-config-${crypto.randomBytes(16).toString("hex")}.json`;
@@ -2281,108 +2292,114 @@ export async function executeAgentLoop(
     }
 
     if (alive && signingKey) {
-      // Build opts for daemon — includes apiKey so key rotation takes effect
-      const daemonOpts: DaemonRunOpts = {
-        apiKey,
-        model: effectiveModel,
-        models: models.length > 0 ? models : undefined,
-        sessionId: previousSessionId || null,
-        addDirs,
-        maxTurns: maxTurns > 0 ? maxTurns : 0,
-        maxRetries,
-        cwd,
-        dangerouslySkipPermissions,
-        forceResume: forceResume || undefined,
-        verbose: false,
-        useFinishTool,
-        profile: profile || undefined,
-        settingsFile: settingsFile || undefined,
-        siteUrl: siteUrl || undefined,
-        siteName: siteName || undefined,
-        sandboxRoot: sandboxRoot || undefined,
-        parallel_tool_calls: parallelToolCalls,
-        tool_choice: toolChoice || undefined,
-        temperature,
-        top_p,
-        top_k,
-        frequency_penalty,
-        presence_penalty,
-        repetition_penalty,
-        min_p,
-        seed,
-        stop: stopTokens.length > 0 ? stopTokens : undefined,
-        reasoning: (reasoningEffort || reasoningMaxTokens || reasoningExclude)
-          ? {
-              ...(reasoningEffort ? { effort: reasoningEffort } : {}),
-              ...(reasoningMaxTokens ? { max_tokens: reasoningMaxTokens } : {}),
-              ...(reasoningExclude ? { exclude: true } : {}),
-            }
-          : undefined,
-        provider: (providerOrder || providerIgnore || providerOnly || dataCollection || zdr || sort || quantizations || requireParameters)
-          ? {
-              ...(providerOrder ? { order: providerOrder.split(",").filter(Boolean) } : {}),
-              ...(providerIgnore ? { ignore: providerIgnore.split(",").filter(Boolean) } : {}),
-              ...(providerOnly ? { only: providerOnly.split(",").filter(Boolean) } : {}),
-              ...(dataCollection ? { data_collection: dataCollection } : {}),
-              ...(zdr ? { zdr: true } : {}),
-              ...(sort ? { sort } : {}),
-              ...(quantizations ? { quantizations: quantizations.split(",").filter(Boolean) } : {}),
-              ...(requireParameters ? { require_parameters: true } : {}),
-            }
-          : undefined,
-        preset: preset || undefined,
-        transforms: transforms ? transforms.split(",").filter(Boolean) : undefined,
-        maxCostUsd,
-        maxCostUsdSoft,
-        costPerInputToken,
-        costPerOutputToken,
-        requireApproval: effectiveRequireApproval,
-        summarizeAt,
-        summarizeModel: summarizeModel || undefined,
-        summarizeKeepRecentTurns,
-        tagToolOutputs,
-        planMode: planMode || undefined,
-        injectContext: injectContext || undefined,
-        bashPolicy: Object.keys(bashPolicy).length > 0 ? bashPolicy : undefined,
-        trackFileChanges: trackFileChanges || undefined,
-        enableBrowserTools: enableBrowserTools || undefined,
-        readProjectInstructions,
-        turnModelRules,
-        summarizePrompt,
-        summarizeFallbackKeep,
-        webhookUrl,
-        hooks,
-        hookTimeoutMs,
-        hookErrorMode,
-        approvalTimeoutMs,
-        mcpServers,
-        requireMcpServers: requireMcpServers && requireMcpServers.length > 0 ? requireMcpServers : undefined,
-        toolTimeouts,
-        maxSpawnDepth,
-        maxIdenticalToolCallTurns,
-        toolErrorBudgetHardStop,
-        appendSystemPrompt: safeInstructionsFilePath
-          ? await fs.readFile(safeInstructionsFilePath, "utf8").catch(() => undefined)
-          : undefined,
-        promptContent: promptContent ?? undefined,
-        approvalMode,
-        ...(approvalAnswer ? { approvalAnswer } : {}),
-        ...(typeof responseFormat.type === "string" && responseFormat.type ? { response_format: responseFormat } : {}),
-        timeoutSec,
-        ...(apiKeyPool.length > 1 ? { apiKeys: apiKeyPool } : {}),
-        ...(requiredEnvVars.length > 0 ? { requiredEnvVars } : {}),
-        ...(asString(config.agentApiKey, "").trim() ? { agentApiKey: asString(config.agentApiKey, "").trim() } : {}),
-        memoryKey: buildMemoryKey(agent.id, workspaceRepoUrl),
-        ...(["embedding", "fts", "local"].includes(asString(config.memoryRetrieval, ""))
-          ? {
-              memoryRetrieval: asString(config.memoryRetrieval, "") as "embedding" | "fts" | "local",
-              ...(asString(config.memoryRetrieval, "") === "embedding" && asString(config.memoryEmbeddingModel, "")
-                ? { memoryEmbeddingModel: asString(config.memoryEmbeddingModel, "") }
-                : {}),
-            }
-          : {}),
-        ...(asNumber(config.memoryMaxChars, 0) > 0 ? { memoryMaxChars: asNumber(config.memoryMaxChars, 0) } : {}),
+      // Build opts for daemon path — parallel to buildConfigFilePayload above.
+      // Uses the same extracted variables but structures provider/reasoning as
+      // nested objects (DaemonRunOpts shape) instead of flat config-file fields.
+      const buildDaemonRunOpts = async (): Promise<DaemonRunOpts> => {
+        const _responseFormat = parseObject(config.responseFormat);
+        return {
+          apiKey,
+          model: effectiveModel,
+          models: models.length > 0 ? models : undefined,
+          sessionId: previousSessionId || null,
+          addDirs,
+          maxTurns: maxTurns > 0 ? maxTurns : 0,
+          maxRetries,
+          cwd,
+          dangerouslySkipPermissions,
+          forceResume: forceResume || undefined,
+          verbose: false,
+          useFinishTool,
+          profile: profile || undefined,
+          settingsFile: settingsFile || undefined,
+          siteUrl: siteUrl || undefined,
+          siteName: siteName || undefined,
+          sandboxRoot: sandboxRoot || undefined,
+          parallel_tool_calls: parallelToolCalls,
+          tool_choice: toolChoice || undefined,
+          temperature,
+          top_p,
+          top_k,
+          frequency_penalty,
+          presence_penalty,
+          repetition_penalty,
+          min_p,
+          seed,
+          stop: stopTokens.length > 0 ? stopTokens : undefined,
+          reasoning: (reasoningEffort || reasoningMaxTokens || reasoningExclude)
+            ? {
+                ...(reasoningEffort ? { effort: reasoningEffort } : {}),
+                ...(reasoningMaxTokens ? { max_tokens: reasoningMaxTokens } : {}),
+                ...(reasoningExclude ? { exclude: true } : {}),
+              }
+            : undefined,
+          provider: (providerOrder || providerIgnore || providerOnly || dataCollection || zdr || sort || quantizations || requireParameters)
+            ? {
+                ...(providerOrder ? { order: providerOrder.split(",").filter(Boolean) } : {}),
+                ...(providerIgnore ? { ignore: providerIgnore.split(",").filter(Boolean) } : {}),
+                ...(providerOnly ? { only: providerOnly.split(",").filter(Boolean) } : {}),
+                ...(dataCollection ? { data_collection: dataCollection } : {}),
+                ...(zdr ? { zdr: true } : {}),
+                ...(sort ? { sort } : {}),
+                ...(quantizations ? { quantizations: quantizations.split(",").filter(Boolean) } : {}),
+                ...(requireParameters ? { require_parameters: true } : {}),
+              }
+            : undefined,
+          preset: preset || undefined,
+          transforms: transforms ? transforms.split(",").filter(Boolean) : undefined,
+          maxCostUsd,
+          maxCostUsdSoft,
+          costPerInputToken,
+          costPerOutputToken,
+          requireApproval: effectiveRequireApproval,
+          summarizeAt,
+          summarizeModel: summarizeModel || undefined,
+          summarizeKeepRecentTurns,
+          tagToolOutputs,
+          planMode: planMode || undefined,
+          injectContext: injectContext || undefined,
+          bashPolicy: Object.keys(bashPolicy).length > 0 ? bashPolicy : undefined,
+          trackFileChanges: trackFileChanges || undefined,
+          enableBrowserTools: enableBrowserTools || undefined,
+          readProjectInstructions,
+          turnModelRules,
+          summarizePrompt,
+          summarizeFallbackKeep,
+          webhookUrl,
+          hooks,
+          hookTimeoutMs,
+          hookErrorMode,
+          approvalTimeoutMs,
+          mcpServers,
+          requireMcpServers: requireMcpServers && requireMcpServers.length > 0 ? requireMcpServers : undefined,
+          toolTimeouts,
+          maxSpawnDepth,
+          maxIdenticalToolCallTurns,
+          toolErrorBudgetHardStop,
+          appendSystemPrompt: safeInstructionsFilePath
+            ? await fs.readFile(safeInstructionsFilePath, "utf8").catch(() => undefined)
+            : undefined,
+          promptContent: promptContent ?? undefined,
+          approvalMode,
+          ...(approvalAnswer ? { approvalAnswer } : {}),
+          ...(typeof _responseFormat.type === "string" && _responseFormat.type ? { response_format: _responseFormat } : {}),
+          timeoutSec,
+          ...(apiKeyPool.length > 1 ? { apiKeys: apiKeyPool } : {}),
+          ...(requiredEnvVars.length > 0 ? { requiredEnvVars } : {}),
+          ...(asString(config.agentApiKey, "").trim() ? { agentApiKey: asString(config.agentApiKey, "").trim() } : {}),
+          memoryKey: buildMemoryKey(agent.id, workspaceRepoUrl),
+          ...(["embedding", "fts", "local"].includes(asString(config.memoryRetrieval, ""))
+            ? {
+                memoryRetrieval: asString(config.memoryRetrieval, "") as "embedding" | "fts" | "local",
+                ...(asString(config.memoryRetrieval, "") === "embedding" && asString(config.memoryEmbeddingModel, "")
+                  ? { memoryEmbeddingModel: asString(config.memoryEmbeddingModel, "") }
+                  : {}),
+              }
+            : {}),
+          ...(asNumber(config.memoryMaxChars, 0) > 0 ? { memoryMaxChars: asNumber(config.memoryMaxChars, 0) } : {}),
+        };
       };
+      const daemonOpts = await buildDaemonRunOpts();
 
       const daemonResult = await executeViaDaemon(
         daemonBaseUrl,
