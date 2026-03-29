@@ -782,3 +782,140 @@ describe("buildOpenRouterConfig — agentId override", () => {
     expect((config as Record<string, unknown>).agentId).toBe("my-agent");
   });
 });
+
+// ── provider routing block ────────────────────────────────────────────────────
+// Source: build-config.ts lines 67–93
+// The seven fields all assemble into a nested config.provider object.
+// The object is only attached when at least one field is set.
+
+describe("buildOpenRouterConfig — provider routing block", () => {
+  type Cfg = Record<string, unknown>;
+  type Provider = Record<string, unknown>;
+
+  function provider(overrides: Parameters<typeof makeValues>[0]): Provider | undefined {
+    return (buildOpenRouterConfig(makeValues(overrides)) as Cfg).provider as Provider | undefined;
+  }
+
+  // ── providerOrder ───────────────────────────────────────────────────────────
+
+  it("providerOrder: non-empty array → provider.order set", () => {
+    const p = provider({ providerOrder: ["openai", "anthropic"] } as Parameters<typeof makeValues>[0]);
+    expect(p?.order).toEqual(["openai", "anthropic"]);
+  });
+
+  it("providerOrder: empty array → provider.order absent, provider object absent", () => {
+    const cfg = buildOpenRouterConfig(
+      makeValues({ providerOrder: [] } as Parameters<typeof makeValues>[0]),
+    ) as Cfg;
+    expect(Object.prototype.hasOwnProperty.call(cfg, "provider")).toBe(false);
+  });
+
+  // ── providerOnly ────────────────────────────────────────────────────────────
+
+  it("providerOnly: non-empty array → provider.only set", () => {
+    const p = provider({ providerOnly: ["azure"] } as Parameters<typeof makeValues>[0]);
+    expect(p?.only).toEqual(["azure"]);
+  });
+
+  it("providerOnly: empty array → field absent", () => {
+    const cfg = buildOpenRouterConfig(
+      makeValues({ providerOnly: [] } as Parameters<typeof makeValues>[0]),
+    ) as Cfg;
+    expect(Object.prototype.hasOwnProperty.call(cfg, "provider")).toBe(false);
+  });
+
+  // ── providerIgnore ──────────────────────────────────────────────────────────
+
+  it("providerIgnore: non-empty array → provider.ignore set", () => {
+    const p = provider({ providerIgnore: ["cohere"] } as Parameters<typeof makeValues>[0]);
+    expect(p?.ignore).toEqual(["cohere"]);
+  });
+
+  it("providerIgnore: empty array → field absent", () => {
+    const cfg = buildOpenRouterConfig(
+      makeValues({ providerIgnore: [] } as Parameters<typeof makeValues>[0]),
+    ) as Cfg;
+    expect(Object.prototype.hasOwnProperty.call(cfg, "provider")).toBe(false);
+  });
+
+  // ── dataCollection ──────────────────────────────────────────────────────────
+
+  it("dataCollection: non-empty string → provider.data_collection set (trimmed)", () => {
+    const p = provider({ dataCollection: " deny " } as Parameters<typeof makeValues>[0]);
+    expect(p?.data_collection).toBe("deny");
+  });
+
+  it("dataCollection: empty string → provider absent", () => {
+    const cfg = buildOpenRouterConfig(
+      makeValues({ dataCollection: "" } as Parameters<typeof makeValues>[0]),
+    ) as Cfg;
+    expect(Object.prototype.hasOwnProperty.call(cfg, "provider")).toBe(false);
+  });
+
+  // ── zeroDataRetention ───────────────────────────────────────────────────────
+
+  it("zeroDataRetention: true → provider.zdr is true", () => {
+    const p = provider({ zeroDataRetention: true } as Parameters<typeof makeValues>[0]);
+    expect(p?.zdr).toBe(true);
+  });
+
+  it("zeroDataRetention: false → provider.zdr is false (boolean guard passes for false)", () => {
+    const p = provider({ zeroDataRetention: false } as Parameters<typeof makeValues>[0]);
+    expect(p?.zdr).toBe(false);
+  });
+
+  // ── providerSort ────────────────────────────────────────────────────────────
+
+  it("providerSort: non-empty string → provider.sort set (trimmed)", () => {
+    const p = provider({ providerSort: " price " } as Parameters<typeof makeValues>[0]);
+    expect(p?.sort).toBe("price");
+  });
+
+  it("providerSort: whitespace-only → provider absent", () => {
+    const cfg = buildOpenRouterConfig(
+      makeValues({ providerSort: "   " } as Parameters<typeof makeValues>[0]),
+    ) as Cfg;
+    expect(Object.prototype.hasOwnProperty.call(cfg, "provider")).toBe(false);
+  });
+
+  // ── quantizations ───────────────────────────────────────────────────────────
+
+  it("quantizations: non-empty array → provider.quantizations set", () => {
+    const p = provider({ quantizations: ["fp16", "int8"] } as Parameters<typeof makeValues>[0]);
+    expect(p?.quantizations).toEqual(["fp16", "int8"]);
+  });
+
+  it("quantizations: empty array → provider absent", () => {
+    const cfg = buildOpenRouterConfig(
+      makeValues({ quantizations: [] } as Parameters<typeof makeValues>[0]),
+    ) as Cfg;
+    expect(Object.prototype.hasOwnProperty.call(cfg, "provider")).toBe(false);
+  });
+
+  // ── combined / absent ───────────────────────────────────────────────────────
+
+  it("all seven fields set → provider object contains all seven sub-fields", () => {
+    const p = provider({
+      providerOrder:    ["openai", "anthropic"],
+      providerOnly:     ["azure"],
+      providerIgnore:   ["cohere"],
+      dataCollection:   "allow",
+      zeroDataRetention: true,
+      providerSort:     "throughput",
+      quantizations:    ["fp16"],
+    } as Parameters<typeof makeValues>[0]);
+    expect(p).toBeDefined();
+    expect(p?.order).toEqual(["openai", "anthropic"]);
+    expect(p?.only).toEqual(["azure"]);
+    expect(p?.ignore).toEqual(["cohere"]);
+    expect(p?.data_collection).toBe("allow");
+    expect(p?.zdr).toBe(true);
+    expect(p?.sort).toBe("throughput");
+    expect(p?.quantizations).toEqual(["fp16"]);
+  });
+
+  it("no provider fields set → config.provider absent entirely", () => {
+    const cfg = buildOpenRouterConfig(makeValues()) as Cfg;
+    expect(Object.prototype.hasOwnProperty.call(cfg, "provider")).toBe(false);
+  });
+});
