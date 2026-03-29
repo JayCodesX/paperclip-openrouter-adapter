@@ -243,6 +243,9 @@ export function buildOpenRouterConfig(
   if (typeof vc.webhookUrl === "string" && (vc.webhookUrl as string).trim()) {
     ac.webhookUrl = (vc.webhookUrl as string).trim();
   }
+  if ((vc.webhookFormat as string | undefined) === "discord") {
+    ac.webhookFormat = "discord";
+  }
 
   // ── Extended summarization ────────────────────────────────────────────────
   if (typeof vc.summarizePrompt === "string" && (vc.summarizePrompt as string).trim()) {

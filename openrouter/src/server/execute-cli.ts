@@ -715,6 +715,7 @@ interface DaemonRunOpts {
   hookTimeoutMs?: number;
   hookErrorMode?: string;
   webhookUrl?: string;
+  webhookFormat?: "discord";
   // ── MCP ─────────────────────────────────────────────────────────────────
   mcpServers?: unknown;
   requireMcpServers?: string[];
@@ -1483,6 +1484,10 @@ export async function executeAgentLoop(
     }
     return validated || undefined;
   })();
+  const webhookFormat: "discord" | undefined = (() => {
+    const raw = typeof config.webhookFormat === "string" ? config.webhookFormat.trim() : "";
+    return raw === "discord" ? "discord" : undefined;
+  })();
 
   // Extended agent loop options
   const tagToolOutputs =
@@ -2033,6 +2038,7 @@ export async function executeAgentLoop(
     if (summarizePrompt) obj.summarizePrompt = summarizePrompt;
     if (summarizeFallbackKeep !== undefined) obj.summarizeFallbackKeep = summarizeFallbackKeep;
     if (webhookUrl) obj.webhookUrl = webhookUrl;
+    if (webhookUrl && webhookFormat) obj.webhookFormat = webhookFormat;
     if (hooks) obj.hooks = hooks;
     if (hookTimeoutMs !== undefined) obj.hookTimeoutMs = hookTimeoutMs;
     if (hookErrorMode !== undefined) obj.hookErrorMode = hookErrorMode;
@@ -2443,6 +2449,7 @@ export async function executeAgentLoop(
           summarizePrompt,
           summarizeFallbackKeep,
           webhookUrl,
+          webhookFormat: (webhookUrl && webhookFormat) ? webhookFormat : undefined,
           hooks,
           hookTimeoutMs,
           hookErrorMode,
