@@ -688,9 +688,12 @@ async function executeViaDaemon(baseUrl, signingKey, agentId, prompt, promptCont
                     }
                     if (event.type === "warn" && typeof event.message === "string") {
                         void onLog("stderr", `[openrouter adapter] ${event.message}\n`);
-                        // Detect silent session restart — orager emits this when the requested
-                        // session isn't found on the daemon and it starts a fresh one instead.
-                        if (event.message.includes(SESSION_NOT_FOUND_MARKER)) {
+                        // Detect silent session restart — orager emits a structured warn event
+                        // (subtype "session_lost") when the requested session isn't found on the
+                        // daemon and it starts a fresh one instead. Fall back to string-match for
+                        // backwards compatibility with older orager versions.
+                        if (event["subtype"] === "session_lost" ||
+                            event.message.includes(SESSION_NOT_FOUND_MARKER)) {
                             sessionLost = true;
                             structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId, runId: "", message: "Daemon session not found — started fresh" });
                         }
@@ -2279,6 +2282,12 @@ export async function executeAgentLoop(ctx) {
                     }
                     if (event.type === "result") {
                         resultEvent = event;
+                    }
+                    // Detect structured session-lost event (orager >= sprint2). The stderr
+                    // string-match below remains as a fallback for older versions.
+                    if (event.type === "warn" && event["subtype"] === "session_lost") {
+                        sessionLost = true;
+                        structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId: agent.id, runId, sessionId: previousSessionId ?? undefined });
                     }
                     // Keep the first question event — later ones arrive after the daemon has resumed
                     if (event.type === "question" && !questionEvent) {
