@@ -409,6 +409,42 @@ describe("extraArgs blocklist — M4 new blocked flags", () => {
     const result = await executeAgentLoop(makeCtx(["--status=json"]));
     expect(result.errorCode).toBe("config_error");
   });
+
+  // Fix 2: newly-added critical flags (--resume, --model, --system-prompt-file, --output-format, --port)
+  it("rejects --resume in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--resume", "session-abc"]));
+    expect(result.errorCode).toBe("config_error");
+    expect(result.errorMessage).toContain("--resume");
+  });
+
+  it("rejects --resume=<id> (equals-sign variant)", async () => {
+    const result = await executeAgentLoop(makeCtx(["--resume=session-abc"]));
+    expect(result.errorCode).toBe("config_error");
+  });
+
+  it("rejects --model in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--model", "openai/gpt-4o"]));
+    expect(result.errorCode).toBe("config_error");
+    expect(result.errorMessage).toContain("--model");
+  });
+
+  it("rejects --system-prompt-file in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--system-prompt-file", "/etc/evil"]));
+    expect(result.errorCode).toBe("config_error");
+    expect(result.errorMessage).toContain("--system-prompt-file");
+  });
+
+  it("rejects --output-format in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--output-format", "json"]));
+    expect(result.errorCode).toBe("config_error");
+    expect(result.errorMessage).toContain("--output-format");
+  });
+
+  it("rejects --port in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--port", "4000"]));
+    expect(result.errorCode).toBe("config_error");
+    expect(result.errorMessage).toContain("--port");
+  });
 });
 
 describe("webhookUrl loopback SSRF guard", () => {

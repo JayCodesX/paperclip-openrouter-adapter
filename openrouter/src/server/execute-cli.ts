@@ -34,11 +34,15 @@ interface StructuredLogEntry {
   [key: string]: unknown;
 }
 
-// Test-only buffer — populated by _resetStateForTesting / drained by _drainStructuredLogForTesting.
+// In-memory log buffer — used by tests and for in-process diagnostics.
+// Capped at 10,000 entries (ring-buffer eviction) so long-lived Paperclip
+// worker processes do not accumulate unbounded memory across thousands of runs.
+const LOG_BUFFER_MAX = 10_000;
 const _structuredLogBuffer: StructuredLogEntry[] = [];
 
 function structuredLog(entry: StructuredLogEntry): void {
   _structuredLogBuffer.push(entry);
+  if (_structuredLogBuffer.length > LOG_BUFFER_MAX) _structuredLogBuffer.shift();
   if (!STRUCTURED_LOG_FILE) return;
   try {
     appendFileSync(STRUCTURED_LOG_FILE, JSON.stringify({ ...entry, ts: entry.ts }) + "\n");
@@ -2022,6 +2026,10 @@ export async function executeAgentLoop(
   // flag names. Categories:
   //   • Security bypass:   --dangerously-skip-permissions
   //   • Config override:   --config-file, --settings-file
+  //   • Session hijack:    --resume (could load another user's session history)
+  //   • Model override:    --model (could redirect conversation to attacker-controlled endpoint)
+  //   • Prompt injection:  --system-prompt-file (could inject arbitrary system prompt from disk)
+  //   • Output control:    --output-format (adapter controls output format)
   //   • Daemon/proc mode:  --serve, --port, --max-concurrent, --idle-timeout, --allowed-cwd
   //   • Subcommands:       --status, --sessions, --list-sessions, --search-sessions,
   //                        --trash-session, --restore-session, --delete-session,
@@ -2031,6 +2039,10 @@ export async function executeAgentLoop(
     "--dangerously-skip-permissions",
     "--config-file",
     "--settings-file",
+    "--resume",
+    "--model",
+    "--system-prompt-file",
+    "--output-format",
     "--serve",
     "--port",
     "--max-concurrent",
