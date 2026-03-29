@@ -570,6 +570,184 @@ describe("buildOpenRouterConfig — onlineSearch", () => {
   });
 });
 
+// ── reasoning ────────────────────────────────────────────────────────────────
+
+describe("buildOpenRouterConfig — reasoning block", () => {
+  it("reasoningEffort: non-empty string → config.reasoning.effort set", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ reasoningEffort: "high" } as Parameters<typeof makeValues>[0]),
+    ) as Record<string, unknown>;
+    expect((config.reasoning as Record<string, unknown>).effort).toBe("high");
+  });
+
+  it("reasoningEffort: whitespace-only → reasoning object absent", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ reasoningEffort: "   " } as Parameters<typeof makeValues>[0]),
+    ) as Record<string, unknown>;
+    // whitespace-only trims to empty string → guard fails → reasoning not set
+    expect(Object.prototype.hasOwnProperty.call(config, "reasoning")).toBe(false);
+  });
+
+  it("reasoningEffort: trims surrounding whitespace", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ reasoningEffort: "  medium  " } as Parameters<typeof makeValues>[0]),
+    ) as Record<string, unknown>;
+    expect((config.reasoning as Record<string, unknown>).effort).toBe("medium");
+  });
+
+  it("reasoningMaxTokens: positive number → config.reasoning.max_tokens set", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ reasoningMaxTokens: 4096 } as Parameters<typeof makeValues>[0]),
+    ) as Record<string, unknown>;
+    expect((config.reasoning as Record<string, unknown>).max_tokens).toBe(4096);
+  });
+
+  it("reasoningMaxTokens: zero → reasoning.max_tokens absent", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ reasoningMaxTokens: 0 } as Parameters<typeof makeValues>[0]),
+    ) as Record<string, unknown>;
+    // zero is not > 0 → field not set; reasoning object only absent if no other fields set too
+    expect(Object.prototype.hasOwnProperty.call(config, "reasoning")).toBe(false);
+  });
+
+  it("reasoningMaxTokens: negative → reasoning.max_tokens absent", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ reasoningMaxTokens: -100 } as Parameters<typeof makeValues>[0]),
+    ) as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(config, "reasoning")).toBe(false);
+  });
+
+  it("reasoningExclude: true → config.reasoning.exclude is true", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ reasoningExclude: true } as Parameters<typeof makeValues>[0]),
+    ) as Record<string, unknown>;
+    expect((config.reasoning as Record<string, unknown>).exclude).toBe(true);
+  });
+
+  it("reasoningExclude: false → config.reasoning.exclude is false (boolean guard passes for false)", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ reasoningExclude: false } as Parameters<typeof makeValues>[0]),
+    ) as Record<string, unknown>;
+    expect((config.reasoning as Record<string, unknown>).exclude).toBe(false);
+  });
+
+  it("all three fields set → config.reasoning has effort, max_tokens, and exclude", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({
+        reasoningEffort: "low",
+        reasoningMaxTokens: 1024,
+        reasoningExclude: true,
+      } as Parameters<typeof makeValues>[0]),
+    ) as Record<string, unknown>;
+    const r = config.reasoning as Record<string, unknown>;
+    expect(r.effort).toBe("low");
+    expect(r.max_tokens).toBe(1024);
+    expect(r.exclude).toBe(true);
+  });
+
+  it("no reasoning fields set → config.reasoning absent entirely", () => {
+    const config = buildOpenRouterConfig(makeValues()) as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(config, "reasoning")).toBe(false);
+  });
+});
+
+// ── cost limits ───────────────────────────────────────────────────────────────
+
+describe("buildOpenRouterConfig — cost limits", () => {
+  it("maxCostUsd: positive number → config.maxCostUsd set", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ maxCostUsd: 2.5 } as Parameters<typeof makeValues>[0]),
+    ) as Record<string, unknown>;
+    expect(config.maxCostUsd).toBe(2.5);
+  });
+
+  it("maxCostUsd: zero → field absent", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ maxCostUsd: 0 } as Parameters<typeof makeValues>[0]),
+    ) as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(config, "maxCostUsd")).toBe(false);
+  });
+
+  it("maxCostUsd: negative → field absent", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ maxCostUsd: -1 } as Parameters<typeof makeValues>[0]),
+    ) as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(config, "maxCostUsd")).toBe(false);
+  });
+
+  it("maxCostUsd: absent → field absent", () => {
+    const config = buildOpenRouterConfig(makeValues()) as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(config, "maxCostUsd")).toBe(false);
+  });
+
+  it("maxCostUsdSoft: positive number → config.maxCostUsdSoft set", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ maxCostUsdSoft: 1.0 } as Parameters<typeof makeValues>[0]),
+    ) as Record<string, unknown>;
+    expect(config.maxCostUsdSoft).toBe(1.0);
+  });
+
+  it("maxCostUsdSoft: zero → field absent", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ maxCostUsdSoft: 0 } as Parameters<typeof makeValues>[0]),
+    ) as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(config, "maxCostUsdSoft")).toBe(false);
+  });
+
+  it("costPerInputToken: positive number → config.costPerInputToken set", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ costPerInputToken: 0.000003 } as Parameters<typeof makeValues>[0]),
+    ) as Record<string, unknown>;
+    expect(config.costPerInputToken).toBe(0.000003);
+  });
+
+  it("costPerInputToken: zero → field absent", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ costPerInputToken: 0 } as Parameters<typeof makeValues>[0]),
+    ) as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(config, "costPerInputToken")).toBe(false);
+  });
+
+  it("costPerOutputToken: positive number → config.costPerOutputToken set", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ costPerOutputToken: 0.000015 } as Parameters<typeof makeValues>[0]),
+    ) as Record<string, unknown>;
+    expect(config.costPerOutputToken).toBe(0.000015);
+  });
+
+  it("costPerOutputToken: zero → field absent", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ costPerOutputToken: 0 } as Parameters<typeof makeValues>[0]),
+    ) as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(config, "costPerOutputToken")).toBe(false);
+  });
+
+  it("all four cost fields set → all four are present in config", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({
+        maxCostUsd: 5.0,
+        maxCostUsdSoft: 3.0,
+        costPerInputToken: 0.000002,
+        costPerOutputToken: 0.000010,
+      } as Parameters<typeof makeValues>[0]),
+    ) as Record<string, unknown>;
+    expect(config.maxCostUsd).toBe(5.0);
+    expect(config.maxCostUsdSoft).toBe(3.0);
+    expect(config.costPerInputToken).toBe(0.000002);
+    expect(config.costPerOutputToken).toBe(0.000010);
+  });
+
+  it("no cost fields set → all four fields absent", () => {
+    const config = buildOpenRouterConfig(makeValues()) as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(config, "maxCostUsd")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(config, "maxCostUsdSoft")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(config, "costPerInputToken")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(config, "costPerOutputToken")).toBe(false);
+  });
+});
+
+// ── agentId ───────────────────────────────────────────────────────────────────
+
 describe("buildOpenRouterConfig — agentId override", () => {
   it("agentId: non-empty string → config.agentId set", () => {
     const config = buildOpenRouterConfig(
