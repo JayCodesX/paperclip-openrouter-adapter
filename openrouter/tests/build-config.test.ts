@@ -292,6 +292,48 @@ describe("buildOpenRouterConfig — webhookUrl field", () => {
   });
 });
 
+describe("buildOpenRouterConfig — webhookFormat field", () => {
+  it("passes through webhookFormat: 'discord' when set", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ webhookFormat: "discord" } as Parameters<typeof makeValues>[0]),
+    );
+    expect((config as Record<string, unknown>).webhookFormat).toBe("discord");
+  });
+
+  it("omits webhookFormat when not set", () => {
+    const config = buildOpenRouterConfig(makeValues());
+    expect(Object.prototype.hasOwnProperty.call(config, "webhookFormat")).toBe(false);
+  });
+
+  it("omits webhookFormat when set to an unrecognised value", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ webhookFormat: "slack" } as Parameters<typeof makeValues>[0]),
+    );
+    expect(Object.prototype.hasOwnProperty.call(config, "webhookFormat")).toBe(false);
+  });
+});
+
+describe("buildOpenRouterConfig — injectContext field", () => {
+  it("passes through injectContext: true when set", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ injectContext: true } as Parameters<typeof makeValues>[0]),
+    );
+    expect((config as Record<string, unknown>).injectContext).toBe(true);
+  });
+
+  it("omits injectContext when false", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ injectContext: false } as Parameters<typeof makeValues>[0]),
+    );
+    expect(Object.prototype.hasOwnProperty.call(config, "injectContext")).toBe(false);
+  });
+
+  it("omits injectContext when not set", () => {
+    const config = buildOpenRouterConfig(makeValues());
+    expect(Object.prototype.hasOwnProperty.call(config, "injectContext")).toBe(false);
+  });
+});
+
 describe("buildOpenRouterConfig — summarizePrompt and summarizeFallbackKeep", () => {
   it("passes through summarizePrompt when set", () => {
     const config = buildOpenRouterConfig(makeValues({ summarizePrompt: "Summarize concisely." } as Parameters<typeof makeValues>[0]));
@@ -448,11 +490,19 @@ describe("buildOpenRouterConfig — memoryRetrieval", () => {
     expect(Object.prototype.hasOwnProperty.call(config, "memoryEmbeddingModel")).toBe(false);
   });
 
-  it("does not include memoryRetrieval or memoryEmbeddingModel when retrieval is 'local'", () => {
+  it("includes memoryRetrieval when retrieval is 'local'", () => {
     const config = buildOpenRouterConfig(
       makeValues({ memoryRetrieval: "local" } as Parameters<typeof makeValues>[0]),
     );
-    expect(Object.prototype.hasOwnProperty.call(config, "memoryRetrieval")).toBe(false);
+    expect((config as Record<string, unknown>).memoryRetrieval).toBe("local");
+    expect(Object.prototype.hasOwnProperty.call(config, "memoryEmbeddingModel")).toBe(false);
+  });
+
+  it("includes memoryRetrieval when retrieval is 'fts'", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ memoryRetrieval: "fts" } as Parameters<typeof makeValues>[0]),
+    );
+    expect((config as Record<string, unknown>).memoryRetrieval).toBe("fts");
     expect(Object.prototype.hasOwnProperty.call(config, "memoryEmbeddingModel")).toBe(false);
   });
 

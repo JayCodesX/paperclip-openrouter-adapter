@@ -331,9 +331,9 @@ export function buildOpenRouterConfig(
   }
 
   // ── Memory retrieval ──────────────────────────────────────────────────────
-  if (vc.memoryRetrieval === "embedding") {
-    ac.memoryRetrieval = "embedding";
-    if (typeof vc.memoryEmbeddingModel === "string" && vc.memoryEmbeddingModel.trim()) {
+  if (vc.memoryRetrieval === "embedding" || vc.memoryRetrieval === "fts" || vc.memoryRetrieval === "local") {
+    ac.memoryRetrieval = vc.memoryRetrieval;
+    if (vc.memoryRetrieval === "embedding" && typeof vc.memoryEmbeddingModel === "string" && vc.memoryEmbeddingModel.trim()) {
       ac.memoryEmbeddingModel = vc.memoryEmbeddingModel.trim();
     }
   }
