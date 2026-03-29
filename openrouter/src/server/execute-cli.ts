@@ -213,6 +213,74 @@ function buildApiKeyPool(config: Record<string, unknown>): { primary: string; po
 // Source: ~/Projects/orager/src/loop.ts — search for "starting fresh"
 export const SESSION_NOT_FOUND_MARKER = "not found, starting fresh";
 
+// ── Shared NDJSON stream event processing ─────────────────────────────────────
+
+/** The parsed shape of a "question" event from the orager event stream. */
+export type OragerQuestionEvent = {
+  type: "question";
+  prompt: string;
+  choices: Array<{ key: string; label: string; description?: string }>;
+  toolCallId: string;
+  toolName: string;
+};
+
+/** Mutable state accumulated while processing an orager event stream. */
+export interface OragerStreamState {
+  sessionId: string;
+  resolvedModel: string;
+  sessionLost: boolean;
+  resultEvent: Record<string, unknown> | null;
+  questionEvent: OragerQuestionEvent | null;
+}
+
+/**
+ * Process a single parsed orager NDJSON event and update `state` in place.
+ *
+ * Shared by the daemon (HTTP streaming) and spawn (stdout) paths so event
+ * handling stays in sync across both. Differences between paths — e.g. the
+ * structured-log call on session loss — are handled via the `onSessionLost`
+ * callback.
+ *
+ * @param event        - Parsed JSON object from the stream.
+ * @param state        - Mutable stream state to update.
+ * @param onLog        - Log sink (same signature as Paperclip's onLog).
+ * @param onSessionLost - Called (once) when a session-loss is detected so the
+ *                        caller can emit a path-specific structuredLog entry.
+ */
+export function processOragerEvent(
+  event: Record<string, unknown>,
+  state: OragerStreamState,
+  onLog: (stream: "stdout" | "stderr", text: string) => Promise<void> | void,
+  onSessionLost: () => void,
+): void {
+  if (event.type === "system" && typeof event.session_id === "string") {
+    state.sessionId = event.session_id;
+    if (typeof event.model === "string" && event.model) {
+      state.resolvedModel = event.model;
+    }
+  }
+  if (event.type === "warn" && typeof event.message === "string") {
+    void onLog("stderr", `[openrouter adapter] ${event.message}\n`);
+    // Primary: structured subtype (orager >= sprint2).
+    // Fallback: message string-match for older orager versions.
+    if (
+      event["subtype"] === "session_lost" ||
+      (event.message as string).includes(SESSION_NOT_FOUND_MARKER)
+    ) {
+      if (!state.sessionLost) {
+        state.sessionLost = true;
+        onSessionLost();
+      }
+    }
+  }
+  if (event.type === "result") {
+    state.resultEvent = event;
+  }
+  if (event.type === "question" && !state.questionEvent) {
+    state.questionEvent = event as OragerQuestionEvent;
+  }
+}
+
 // ── Daemon auto-start rate limiter ────────────────────────────────────────
 // Prevents hammering the system with repeated daemon spawn attempts if the
 // daemon keeps failing to start. Allows at most one auto-start attempt per
@@ -847,17 +915,13 @@ async function executeViaDaemon(
   /** Hard cap on the in-memory line buffer to prevent OOM from runaway output. */
   const MAX_STREAM_BUFFER_BYTES = 10 * 1024 * 1024; // 10 MB
 
-  let resultEvent: Record<string, unknown> | null = null;
-  let questionEvent: {
-    type: "question";
-    prompt: string;
-    choices: Array<{ key: string; label: string; description?: string }>;
-    toolCallId: string;
-    toolName: string;
-  } | null = null;
-  let sessionId = "";
-  let resolvedModel = "";
-  let sessionLost = false;
+  const streamState: OragerStreamState = {
+    sessionId: "",
+    resolvedModel: "",
+    sessionLost: false,
+    resultEvent: null,
+    questionEvent: null,
+  };
   let buffer = "";
 
   const reader = response.body.getReader();
@@ -883,7 +947,7 @@ async function executeViaDaemon(
           if (criticalMatch) {
             try {
               const event = JSON.parse(criticalMatch[0]) as Record<string, unknown>;
-              if (event.type === "result") resultEvent = event;
+              if (event.type === "result") streamState.resultEvent = event;
             } catch {
               // Parse failed — the result event is unrecoverable. Log so operators
               // know the run will end with a synthesised error rather than silently.
@@ -907,36 +971,9 @@ async function executeViaDaemon(
         void onLog("stdout", line + "\n");
         try {
           const event = JSON.parse(line) as Record<string, unknown>;
-          if (event.type === "system" && typeof event.session_id === "string") {
-            sessionId = event.session_id;
-            if (typeof event.model === "string") resolvedModel = event.model;
-          }
-          if (event.type === "warn" && typeof event.message === "string") {
-            void onLog("stderr", `[openrouter adapter] ${event.message}\n`);
-            // Detect silent session restart — orager emits a structured warn event
-            // (subtype "session_lost") when the requested session isn't found on the
-            // daemon and it starts a fresh one instead. Fall back to string-match for
-            // backwards compatibility with older orager versions.
-            if (
-              (event as Record<string, unknown>)["subtype"] === "session_lost" ||
-              event.message.includes(SESSION_NOT_FOUND_MARKER)
-            ) {
-              sessionLost = true;
-              structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId, runId: "", message: "Daemon session not found — started fresh" });
-            }
-          }
-          if (event.type === "result") resultEvent = event;
-          // Keep the first question event — if multiple are emitted, the first is the
-          // one awaiting a response; later ones arrive after the daemon has resumed.
-          if (event.type === "question" && !questionEvent) {
-            questionEvent = event as {
-              type: "question";
-              prompt: string;
-              choices: Array<{ key: string; label: string; description?: string }>;
-              toolCallId: string;
-              toolName: string;
-            };
-          }
+          processOragerEvent(event, streamState, onLog, () => {
+            structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId, runId: "", message: "Daemon session not found — started fresh" });
+          });
         } catch {
           // Non-JSON lines are expected (blank lines, partial chunks) — only warn
           // on lines that LOOK like JSON (start with '{') since those represent
@@ -962,12 +999,16 @@ async function executeViaDaemon(
     if (buffer.trim()) {
       try {
         const event = JSON.parse(buffer) as Record<string, unknown>;
-        if (event.type === "result") resultEvent = event;
+        processOragerEvent(event, streamState, onLog, () => {
+          structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId, runId: "", message: "Daemon session not found — started fresh" });
+        });
       } catch { /* ok */ }
     }
   } finally {
     reader.cancel().catch(() => {});
   }
+
+  const { resultEvent, sessionId, resolvedModel, sessionLost, questionEvent } = streamState;
 
   if (!resultEvent) {
     structuredLog({ level: "error", ts: Date.now(), event: "daemon_no_result", agentId, runId: "", message: "Daemon stream ended without a result event — daemon may have crashed or restarted" });
@@ -2577,17 +2618,13 @@ export async function executeAgentLoop(
       void onLog("stderr", `[openrouter adapter] WARNING: stdin write failed (${stdinErr instanceof Error ? stdinErr.message : String(stdinErr)}) — orager may not have received the prompt\n`);
     }
 
-    let resultEvent: Record<string, unknown> | null = null;
-    let questionEvent: {
-      type: "question";
-      prompt: string;
-      choices: Array<{ key: string; label: string; description?: string }>;
-      toolCallId: string;
-      toolName: string;
-    } | null = null;
-    let sessionId = "";
-    let resolvedModel = "";
-    let sessionLost = false;
+    const spawnStreamState: OragerStreamState = {
+      sessionId: "",
+      resolvedModel: "",
+      sessionLost: false,
+      resultEvent: null,
+      questionEvent: null,
+    };
     let timedOut = false;
     let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -2644,31 +2681,9 @@ export async function executeAgentLoop(
         void onLog("stdout", line + "\n");
         try {
           const event = JSON.parse(line) as Record<string, unknown>;
-          if (event.type === "system" && typeof event.session_id === "string") {
-            sessionId = event.session_id;
-            if (typeof event.model === "string" && event.model) {
-              resolvedModel = event.model;
-            }
-          }
-          if (event.type === "result") {
-            resultEvent = event;
-          }
-          // Detect structured session-lost event (orager >= sprint2). The stderr
-          // string-match below remains as a fallback for older versions.
-          if (event.type === "warn" && event["subtype"] === "session_lost") {
-            sessionLost = true;
+          processOragerEvent(event, spawnStreamState, onLog, () => {
             structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId: agent.id, runId, sessionId: previousSessionId ?? undefined });
-          }
-          // Keep the first question event — later ones arrive after the daemon has resumed
-          if (event.type === "question" && !questionEvent) {
-            questionEvent = event as {
-              type: "question";
-              prompt: string;
-              choices: Array<{ key: string; label: string; description?: string }>;
-              toolCallId: string;
-              toolName: string;
-            };
-          }
+          });
         } catch {
           // non-JSON lines are fine — tool output, bash stdout, etc.
         }
@@ -2677,12 +2692,11 @@ export async function executeAgentLoop(
 
     proc.stderr?.on("data", (chunk: Buffer | string) => {
       const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-      // Orager silently starts a fresh session when the requested session isn't
-      // found. Detect this so we can clear the stale session ID on Paperclip's
-      // side, ensuring the next run is treated as a fresh start (with
-      // instructions re-injected via --system-prompt-file).
-      if (text.includes(SESSION_NOT_FOUND_MARKER)) {
-        sessionLost = true;
+      // String-match fallback for orager versions that predate the structured
+      // session_lost event (sprint2). processOragerEvent covers the structured
+      // path; this catches the plain-text stderr line for older builds.
+      if (text.includes(SESSION_NOT_FOUND_MARKER) && !spawnStreamState.sessionLost) {
+        spawnStreamState.sessionLost = true;
         structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId: agent.id, runId, sessionId: previousSessionId ?? undefined });
       }
       void onLog("stderr", text);
@@ -2697,13 +2711,9 @@ export async function executeAgentLoop(
         void onLog("stdout", stdoutBuffer + "\n");
         try {
           const event = JSON.parse(stdoutBuffer) as Record<string, unknown>;
-          if (event.type === "result") resultEvent = event;
-          if (
-            event.type === "system" &&
-            typeof event.session_id === "string"
-          ) {
-            sessionId = event.session_id;
-          }
+          processOragerEvent(event, spawnStreamState, onLog, () => {
+            structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId: agent.id, runId, sessionId: previousSessionId ?? undefined });
+          });
         } catch {
           // ok
         }
@@ -2719,6 +2729,8 @@ export async function executeAgentLoop(
         });
         return;
       }
+
+      const { resultEvent, sessionId, resolvedModel, sessionLost, questionEvent } = spawnStreamState;
 
       if (!resultEvent) {
         settle({
