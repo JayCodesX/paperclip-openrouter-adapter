@@ -234,3 +234,95 @@ describe("processRateLimitTracker singleton", () => {
     expect(processRateLimitTracker.isRateLimited()).toBe(false);
   });
 });
+
+// ── updateFromHeaders — partial / malformed headers ───────────────────────────
+
+describe("RateLimitTracker — updateFromHeaders() with partial or malformed headers", () => {
+  it("ignores update when only request-limit headers are present (token fields missing)", () => {
+    const tracker = new RateLimitTracker();
+    // Missing x-ratelimit-limit-tokens and x-ratelimit-remaining-tokens
+    // → parseInt("", 10) = NaN → isFinite(NaN) = false → early return
+    tracker.updateFromHeaders({
+      "x-ratelimit-limit-requests":     "100",
+      "x-ratelimit-remaining-requests": "80",
+    });
+    expect(tracker.getState()).toBeNull();
+  });
+
+  it("ignores update when only token-limit headers are present (request fields missing)", () => {
+    const tracker = new RateLimitTracker();
+    tracker.updateFromHeaders({
+      "x-ratelimit-limit-tokens":     "200000",
+      "x-ratelimit-remaining-tokens": "150000",
+    });
+    expect(tracker.getState()).toBeNull();
+  });
+
+  it("ignores update when exactly one of the four required headers is missing", () => {
+    const tracker = new RateLimitTracker();
+    // Missing x-ratelimit-remaining-tokens — NaN fails isFinite
+    tracker.updateFromHeaders({
+      "x-ratelimit-limit-requests":     "100",
+      "x-ratelimit-remaining-requests": "80",
+      "x-ratelimit-limit-tokens":       "200000",
+      // remaining-tokens intentionally absent
+    });
+    expect(tracker.getState()).toBeNull();
+  });
+
+  it("ignores update when a header value is a non-numeric string", () => {
+    const tracker = new RateLimitTracker();
+    tracker.updateFromHeaders({
+      "x-ratelimit-limit-requests":     "not-a-number",
+      "x-ratelimit-remaining-requests": "80",
+      "x-ratelimit-limit-tokens":       "200000",
+      "x-ratelimit-remaining-tokens":   "150000",
+    });
+    expect(tracker.getState()).toBeNull();
+  });
+
+  it("ignores update when a header value is an empty string", () => {
+    const tracker = new RateLimitTracker();
+    tracker.updateFromHeaders({
+      "x-ratelimit-limit-requests":     "",
+      "x-ratelimit-remaining-requests": "80",
+      "x-ratelimit-limit-tokens":       "200000",
+      "x-ratelimit-remaining-tokens":   "150000",
+    });
+    expect(tracker.getState()).toBeNull();
+  });
+
+  it("accepts update when remaining-requests is 0 and limit-requests is > 0", () => {
+    // 0 is a valid finite integer — this is an exhausted-quota scenario, not missing data
+    const tracker = new RateLimitTracker();
+    tracker.updateFromHeaders({
+      "x-ratelimit-limit-requests":     "100",
+      "x-ratelimit-remaining-requests": "0",
+      "x-ratelimit-limit-tokens":       "200000",
+      "x-ratelimit-remaining-tokens":   "50000",
+    });
+    const state = tracker.getState();
+    expect(state).not.toBeNull();
+    expect(state!.remainingRequests).toBe(0);
+    expect(state!.limitRequests).toBe(100);
+  });
+
+  it("existing state is preserved when a subsequent update is ignored due to partial headers", () => {
+    const tracker = new RateLimitTracker();
+    // First update: valid
+    tracker.updateFromHeaders({
+      "x-ratelimit-limit-requests":     "100",
+      "x-ratelimit-remaining-requests": "90",
+      "x-ratelimit-limit-tokens":       "200000",
+      "x-ratelimit-remaining-tokens":   "180000",
+    });
+    const first = tracker.getState();
+    expect(first).not.toBeNull();
+
+    // Second update: partial — should be ignored, previous state preserved
+    tracker.updateFromHeaders({
+      "x-ratelimit-limit-requests": "100",
+    });
+    expect(tracker.getState()).toEqual(first);
+  });
+});
