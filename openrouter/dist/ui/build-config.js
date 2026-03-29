@@ -150,6 +150,11 @@ export function buildOpenRouterConfig(v) {
     if (typeof vc.trackFileChanges === "boolean" && vc.trackFileChanges) {
         ac.trackFileChanges = true;
     }
+    // onlineSearch: append :online variant suffix so OpenRouter routes to a
+    // web-search-capable provider. Has no effect when model already has a suffix.
+    if (typeof vc.onlineSearch === "boolean" && vc.onlineSearch) {
+        ac.onlineSearch = true;
+    }
     // ── Security (orager-exclusive) ──────────────────────────────────────────────
     if (vc.bashPolicy !== null && typeof vc.bashPolicy === "object") {
         ac.bashPolicy = vc.bashPolicy;
@@ -280,6 +285,12 @@ export function buildOpenRouterConfig(v) {
     // ── Per-agent API key isolation ───────────────────────────────────────────
     if (typeof vc.agentApiKey === "string" && vc.agentApiKey.trim()) {
         ac.agentApiKey = vc.agentApiKey.trim();
+    }
+    // ── Agent identity override ───────────────────────────────────────────────
+    // agentId overrides the Paperclip agent.id sent to the daemon as the JWT
+    // subject → metadata.user_id in Anthropic requests.
+    if (typeof vc.agentId === "string" && vc.agentId.trim()) {
+        ac.agentId = vc.agentId.trim();
     }
     // ── Memory retrieval ──────────────────────────────────────────────────────
     if (vc.memoryRetrieval === "embedding") {
