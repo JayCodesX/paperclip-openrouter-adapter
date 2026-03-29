@@ -7,14 +7,20 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { mintDaemonJwt } from "./jwt-utils.js";
 import { getModelFromLiveCache, _resetModelCacheForTesting } from "./list-models.js";
+import { processRateLimitTracker } from "../rate-limit-tracker.js";
 // ── Structured logging ────────────────────────────────────────────────────────
 // When ORAGER_LOG_FILE is set, JSON structured log lines are appended to that
 // file in addition to the normal human-readable stderr output.
 const STRUCTURED_LOG_FILE = process.env.ORAGER_LOG_FILE ?? "";
-// Test-only buffer — populated by _resetStateForTesting / drained by _drainStructuredLogForTesting.
+// In-memory log buffer — used by tests and for in-process diagnostics.
+// Capped at 10,000 entries (ring-buffer eviction) so long-lived Paperclip
+// worker processes do not accumulate unbounded memory across thousands of runs.
+const LOG_BUFFER_MAX = 10_000;
 const _structuredLogBuffer = [];
 function structuredLog(entry) {
     _structuredLogBuffer.push(entry);
+    if (_structuredLogBuffer.length > LOG_BUFFER_MAX)
+        _structuredLogBuffer.shift();
     if (!STRUCTURED_LOG_FILE)
         return;
     try {
@@ -26,17 +32,24 @@ function structuredLog(entry) {
 // Module-level rolling window shared across all runs in this process.
 // Resets on process restart. Zero-cost runs (dry-run, free-tier) are excluded.
 const COST_WINDOW_SIZE = 20;
+// Minimum number of runs between anomaly alerts to prevent flooding onMeta/stderr
+// in batch workloads where every run is anomalous.
+const COST_ANOMALY_COOLDOWN_RUNS = 10;
 const _costWindow = [];
+let _runsSinceLastAnomaly = COST_ANOMALY_COOLDOWN_RUNS; // start ready to fire
 function recordRunCost(costUsd) {
     if (costUsd <= 0)
         return;
     _costWindow.push(costUsd);
     if (_costWindow.length > COST_WINDOW_SIZE)
         _costWindow.shift();
+    _runsSinceLastAnomaly++;
 }
 function checkCostAnomaly(costUsd, agentId, runId, onLog) {
     if (_costWindow.length < 3)
         return;
+    if (_runsSinceLastAnomaly < COST_ANOMALY_COOLDOWN_RUNS)
+        return; // cooldown active
     const avg = _costWindow.reduce((a, b) => a + b, 0) / _costWindow.length;
     if (avg > 0 && costUsd > avg * 2) {
         const multiplier = (costUsd / avg).toFixed(1);
@@ -53,7 +66,38 @@ function checkCostAnomaly(costUsd, agentId, runId, onLog) {
             rollingAvgCostUsd: avg,
             windowSize: _costWindow.length,
         });
+        _runsSinceLastAnomaly = 0; // reset cooldown
     }
+}
+// ── Memory key ────────────────────────────────────────────────────────────────
+// Computes the key used to namespace orager's memory store.  When a workspace
+// repo URL is available the key includes a filesystem-safe slug derived from
+// the URL so that separate repos don't share memory.
+/** Convert a repo URL into a short filesystem-safe slug. */
+function repoSlug(repoUrl) {
+    // Strip scheme (e.g. "https://") then replace non-alphanumeric characters
+    // with underscores, collapse repeated underscores, trim leading/trailing
+    // underscores and truncate to 64 characters.
+    return repoUrl
+        .replace(/^[a-zA-Z][a-zA-Z0-9+\-.]*:\/\//, "") // strip scheme://
+        .replace(/[^a-zA-Z0-9_]/g, "_") // non-safe chars → _
+        .replace(/_+/g, "_") // collapse repeats
+        .replace(/^_+|_+$/g, "") // trim edges
+        .slice(0, 64);
+}
+/**
+ * Build the memory key for orager.
+ *
+ * - Falls back to `agentId` alone when `repoUrl` is null or empty.
+ * - Otherwise returns `${agentId}_${repoSlug(repoUrl)}` truncated to 128 chars.
+ */
+export function buildMemoryKey(agentId, repoUrl) {
+    if (!repoUrl)
+        return agentId;
+    const slug = repoSlug(repoUrl);
+    if (!slug)
+        return agentId;
+    return `${agentId}_${slug}`.slice(0, 128);
 }
 // ── Vision support check ──────────────────────────────────────────────────────
 // Fetches OpenRouter /api/v1/models to verify the selected model reports
@@ -69,7 +113,9 @@ function checkCostAnomaly(costUsd, agentId, runId, onLog) {
 //
 // Results are cached per model ID for 6 hours to avoid adding per-run latency.
 const _visionCache = new Map();
-const _VISION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+export const VISION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+// Keep the old internal name as an alias so nothing inside the module needs updating
+const _VISION_CACHE_TTL_MS = VISION_CACHE_TTL_MS;
 export async function checkVisionSupport(apiKey, model) {
     const cached = _visionCache.get(model);
     if (cached && Date.now() - cached.ts < _VISION_CACHE_TTL_MS)
@@ -130,7 +176,10 @@ export const SESSION_NOT_FOUND_MARKER = "not found, starting fresh";
 // daemon keeps failing to start. Allows at most one auto-start attempt per
 // 2 minutes across all requests in this process.
 let _lastAutoStartAttemptMs = 0;
-const AUTO_START_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
+const AUTO_START_COOLDOWN_MS = (() => {
+    const v = parseInt(process.env["ORAGER_DAEMON_COOLDOWN_MS"] ?? "", 10);
+    return Number.isFinite(v) && v > 0 ? v : 2 * 60 * 1000; // default: 2 minutes
+})();
 // ── Daemon circuit breaker (per daemon URL) ────────────────────────────────
 // Tracks consecutive daemon failures per daemon URL. After DAEMON_CB_THRESHOLD
 // consecutive failures, that daemon is bypassed for DAEMON_CB_RESET_MS ms.
@@ -167,11 +216,11 @@ const DAEMON_KEY_PATH = path.join(os.homedir(), ".orager", "daemon.key");
 /** How old (in ms) a daemon signing key can be before we emit a rotation warning. */
 const DAEMON_KEY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 let _daemonKeyAgeWarningEmitted = false;
-async function readDaemonSigningKey(onLog) {
+async function readDaemonSigningKey(onLog, keyPath = DAEMON_KEY_PATH) {
     try {
         const [key, stat] = await Promise.all([
-            fs.readFile(DAEMON_KEY_PATH, "utf8"),
-            fs.stat(DAEMON_KEY_PATH),
+            fs.readFile(keyPath, "utf8"),
+            fs.stat(keyPath),
         ]);
         const trimmed = key.trim();
         if (!trimmed)
@@ -180,17 +229,17 @@ async function readDaemonSigningKey(onLog) {
         // with that access could forge daemon JWTs and execute arbitrary agent runs.
         if (stat.mode & 0o077) {
             const modeOctal = (stat.mode & 0o777).toString(8).padStart(3, "0");
-            const msg = `[openrouter adapter] WARNING: daemon signing key at ${DAEMON_KEY_PATH} has unsafe permissions (${modeOctal}). ` +
-                `Run: chmod 600 ${DAEMON_KEY_PATH}`;
+            const msg = `[openrouter adapter] WARNING: daemon signing key at ${keyPath} has unsafe permissions (${modeOctal}). ` +
+                `Run: chmod 600 ${keyPath}`;
             if (onLog)
                 void onLog("stderr", msg + "\n");
-            structuredLog({ level: "warn", ts: Date.now(), event: "daemon_key_unsafe_permissions", keyPath: DAEMON_KEY_PATH, mode: modeOctal });
+            structuredLog({ level: "warn", ts: Date.now(), event: "daemon_key_unsafe_permissions", keyPath, mode: modeOctal });
         }
         const ageMs = Date.now() - stat.mtimeMs;
         if (ageMs > DAEMON_KEY_MAX_AGE_MS && onLog && !_daemonKeyAgeWarningEmitted) {
             _daemonKeyAgeWarningEmitted = true;
             const ageDays = Math.floor(ageMs / (24 * 60 * 60 * 1000));
-            void onLog("stderr", `[openrouter adapter] WARNING: daemon signing key at ${DAEMON_KEY_PATH} is ${ageDays} days old. ` +
+            void onLog("stderr", `[openrouter adapter] WARNING: daemon signing key at ${keyPath} is ${ageDays} days old. ` +
                 `Consider rotating it (delete the file and restart the daemon to generate a new key).\n`);
         }
         return trimmed;
@@ -218,8 +267,9 @@ async function isDaemonAlive(baseUrl) {
  * /health until it responds (up to 5s). Non-fatal — falls through to spawn
  * if start fails.
  */
-async function tryAutoStartDaemon(daemonUrl, cliPath, apiKey, env, onLog) {
-    if (process.env.ORAGER_DAEMON_AUTOSTART !== "true")
+async function tryAutoStartDaemon(daemonUrl, cliPath, apiKey, env, onLog, configAutoStart = false) {
+    // Allow auto-start via env var OR config field
+    if (process.env.ORAGER_DAEMON_AUTOSTART !== "true" && !configAutoStart)
         return false;
     // Rate-limit: only attempt auto-start once per 2 minutes
     const now = Date.now();
@@ -261,10 +311,38 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 // skills/ dir is at the root of the adapter package (two levels up from dist/server/)
 const SKILLS_DIR = path.resolve(__dirname, "..", "..", "skills");
+// Warn at load time if the bundled skills directory is missing — this can happen
+// when the package is loaded from an unexpected location (symlink, monorepo hoisting).
+// Non-fatal: addDirs will include a non-existent path, which orager silently ignores.
+fs.stat(SKILLS_DIR).then((s) => {
+    if (!s.isDirectory()) {
+        process.stderr.write(`[openrouter adapter] WARNING: bundled skills directory is not a directory: ${SKILLS_DIR}\n`);
+    }
+}).catch(() => {
+    process.stderr.write(`[openrouter adapter] WARNING: bundled skills directory not found: ${SKILLS_DIR} — Paperclip skills (get-task, post-comment, etc.) will not be available\n`);
+});
 import { asString, asNumber, asBoolean, parseObject, buildPaperclipEnv, renderTemplate, joinPromptSections, } from "@paperclipai/adapter-utils/server-utils";
 // ── Local utility shims ───────────────────────────────────────────────────────
 // These mirror functions in newer versions of @paperclipai/adapter-utils that
 // may not yet be exported in the installed version.
+/**
+ * Return true if `host` is a loopback address (IPv4 127.x.x.x, IPv6 ::1,
+ * IPv6-mapped IPv4 loopback ::ffff:127.x.x.x / ::ffff:7f00:1, or "localhost").
+ * Used to block SSRF attacks that try to reach local services.
+ */
+function isLoopbackHost(host) {
+    // Node.js URL.hostname returns bracketed IPv6 (e.g. "[::1]", "[::ffff:7f00:1]")
+    // Strip brackets to normalize before matching.
+    const h = host.toLowerCase().replace(/^\[|\]$/g, "");
+    return (h === "localhost" ||
+        h === "127.0.0.1" ||
+        h === "::1" ||
+        h === "0.0.0.0" ||
+        /^127\./.test(h) ||
+        // IPv6-mapped IPv4 loopback: ::ffff:127.x.x.x or ::ffff:7f00:1
+        /^::ffff:127\./i.test(h) ||
+        h === "::ffff:7f00:1");
+}
 /**
  * Validate that a string is a well-formed http/https URL.
  * Returns the trimmed URL if valid, empty string if not.
@@ -432,12 +510,18 @@ async function executeViaDaemon(baseUrl, signingKey, agentId, prompt, promptCont
         };
     }
     if (response.status === 503) {
-        // Respect Retry-After header (max 30s wait) then retry the daemon once.
+        // Respect Retry-After header then retry the daemon once.
         // If still saturated after the retry, return null to trigger spawn fallback (#1).
         const retryAfterSec = Math.min(Math.max(parseInt(response.headers.get("Retry-After") ?? "5", 10) || 5, 1), 30);
-        structuredLog({ level: "warn", ts: Date.now(), event: "daemon_retry", agentId, runId: "", message: `Daemon at capacity, retrying in ${retryAfterSec}s` });
-        void onLog("stderr", `[openrouter adapter] daemon at capacity — retrying in ${retryAfterSec}s\n`);
-        await new Promise((r) => setTimeout(r, Math.min(retryAfterSec * 1000, 4 * 60 * 1000)));
+        // Cap wait to half of timeoutSec so we never wait longer than the run budget.
+        // Without this cap, a 30s Retry-After combined with a 60s timeout would cause
+        // the second fetch's AbortSignal.timeout() to fire mid-wait, masking a timeout
+        // as a silent spawn fallback.
+        const maxWaitMs = timeoutSec > 0 ? Math.max(Math.floor((timeoutSec * 1000) / 2), 1000) : 30_000;
+        const waitMs = Math.min(retryAfterSec * 1000, maxWaitMs);
+        structuredLog({ level: "warn", ts: Date.now(), event: "daemon_retry", agentId, runId: "", message: `Daemon at capacity, retrying in ${Math.round(waitMs / 1000)}s` });
+        void onLog("stderr", `[openrouter adapter] daemon at capacity — retrying in ${Math.round(waitMs / 1000)}s\n`);
+        await new Promise((r) => setTimeout(r, waitMs));
         // Retry with a fresh token (original may expire if wait was long)
         const retryToken = mintDaemonJwt(signingKey, agentId);
         try {
@@ -451,12 +535,70 @@ async function executeViaDaemon(baseUrl, signingKey, agentId, prompt, promptCont
                 signal: AbortSignal.timeout((timeoutSec + 10) * 1000),
             });
         }
-        catch {
-            // Retry network failure — fall back to spawn
+        catch (retryErr) {
+            // For timeout/abort errors, surface as a structured error rather than
+            // silently falling back to spawn (which would start a second full run).
+            const isTimeout = retryErr instanceof Error && retryErr.name === "TimeoutError";
+            const isAbort = retryErr instanceof Error && retryErr.name === "AbortError";
+            if (isTimeout || isAbort) {
+                return {
+                    exitCode: 1,
+                    signal: null,
+                    timedOut: isTimeout,
+                    errorMessage: `Daemon retry request ${isTimeout ? "timed out" : "was aborted"}`,
+                    errorCode: isTimeout ? "timeout" : "daemon_error",
+                };
+            }
+            // Other network failure on retry — fall back to spawn
             return null;
         }
         if (response.status === 503) {
             // Still at capacity after retry — fall back to spawn
+            return null;
+        }
+    }
+    // 429 = rate-limited. Respect Retry-After header and retry once, then fall
+    // back to spawn. Unlike 503 (capacity), 429 means the API key is rate-limited;
+    // retrying quickly would just receive another 429.
+    // The process-level processRateLimitTracker is updated so callers can check
+    // rate-limit state and so the gate activates on the next request if needed.
+    if (response.status === 429) {
+        const retryAfterSec = Math.min(Math.max(parseInt(response.headers.get("Retry-After") ?? "10", 10) || 10, 1), 60);
+        const maxWaitMs = timeoutSec > 0 ? Math.max(Math.floor((timeoutSec * 1000) / 2), 1000) : 60_000;
+        const waitMs = Math.min(retryAfterSec * 1000, maxWaitMs);
+        processRateLimitTracker.recordRateLimit(waitMs);
+        processRateLimitTracker.updateFromHeaders(response.headers);
+        structuredLog({ level: "warn", ts: Date.now(), event: "daemon_rate_limited", agentId, runId: "", waitMs, message: `Daemon rate-limited (429), retrying in ${Math.round(waitMs / 1000)}s` });
+        void onLog("stderr", `[openrouter adapter] daemon rate-limited — retrying in ${Math.round(waitMs / 1000)}s\n`);
+        await new Promise((r) => setTimeout(r, waitMs));
+        const retryToken = mintDaemonJwt(signingKey, agentId);
+        try {
+            response = await fetch(`${baseUrl}/run`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${retryToken}`,
+                },
+                body: JSON.stringify({ prompt, promptContent: promptContent ?? undefined, opts: daemonOpts }),
+                signal: AbortSignal.timeout((timeoutSec + 10) * 1000),
+            });
+        }
+        catch (retryErr) {
+            const isTimeout = retryErr instanceof Error && retryErr.name === "TimeoutError";
+            const isAbort = retryErr instanceof Error && retryErr.name === "AbortError";
+            if (isTimeout || isAbort) {
+                return {
+                    exitCode: 1,
+                    signal: null,
+                    timedOut: isTimeout,
+                    errorMessage: `Daemon retry request after 429 ${isTimeout ? "timed out" : "was aborted"}`,
+                    errorCode: isTimeout ? "timeout" : "daemon_error",
+                };
+            }
+            return null;
+        }
+        if (response.status === 429) {
+            // Still rate-limited after retry — fall back to spawn
             return null;
         }
     }
@@ -471,6 +613,8 @@ async function executeViaDaemon(baseUrl, signingKey, agentId, prompt, promptCont
             errorCode: isAuth ? "auth_error" : "daemon_error",
         };
     }
+    // Successful response — clear any recorded rate-limit back-off state.
+    processRateLimitTracker.clearRateLimit();
     if (!response.body) {
         return {
             exitCode: 1,
@@ -564,6 +708,15 @@ async function executeViaDaemon(baseUrl, signingKey, agentId, prompt, promptCont
                     // actual parse failures that could mask dropped result/question events.
                     if (line.trimStart().startsWith("{")) {
                         void onLog("stderr", `[openrouter adapter] WARNING: failed to parse JSON event from daemon stream: ${line.slice(0, 200)}\n`);
+                        // Also emit to structured log so parse failures are visible in
+                        // operational dashboards, not just in the ephemeral stderr stream.
+                        structuredLog({
+                            level: "warn",
+                            ts: Date.now(),
+                            event: "daemon_stream_parse_error",
+                            agentId,
+                            linePreview: line.slice(0, 200),
+                        });
                     }
                 }
             }
@@ -600,7 +753,7 @@ async function executeViaDaemon(baseUrl, signingKey, agentId, prompt, promptCont
         sessionId,
         resolvedModel,
         sessionLost,
-        cwd: typeof daemonOpts.cwd === "string" ? daemonOpts.cwd : "",
+        cwd: daemonOpts.cwd ?? "",
         workspaceId: null,
         workspaceRepoUrl: null,
         workspaceRepoRef: null,
@@ -684,12 +837,15 @@ function buildAdapterResult(opts) {
             filesChanged: Array.isArray(resultEvent.filesChanged)
                 ? resultEvent.filesChanged
                 : undefined,
+            cacheWriteInputTokens: typeof usageRaw?.cache_creation_input_tokens === "number"
+                ? usageRaw.cache_creation_input_tokens
+                : undefined,
         },
         question: null, // caller sets this if needed
     };
 }
 const DEFAULT_CLI = "orager";
-const DEFAULT_MODEL = "deepseek/deepseek-chat-v3-0324";
+const DEFAULT_MODEL = "deepseek/deepseek-chat-v3-2";
 const DEFAULT_MAX_TURNS = 20;
 const DEFAULT_MAX_RETRIES = 3;
 // Ordered fallback chain tried when the configured model doesn't support vision.
@@ -744,6 +900,37 @@ export async function executeAgentLoop(ctx) {
     let effectiveModel = (wakeReason && typeof wakeReasonModels[wakeReason] === "string"
         ? wakeReasonModels[wakeReason]
         : null) ?? model;
+    // Emit a structured log entry when wakeReason routes to a different model so
+    // the routing decision is captured in the structured audit trail.
+    if (wakeReason && effectiveModel !== model) {
+        structuredLog({
+            level: "info",
+            ts: Date.now(),
+            event: "wake_reason_model_routed",
+            agentId: agent.id,
+            runId,
+            wakeReason,
+            requestedModel: model,
+            effectiveModel,
+            message: `wakeReasonModels: routing '${wakeReason}' → '${effectiveModel}' (base model: '${model}')`,
+        });
+    }
+    // ── onlineSearch — append :online suffix for web-search-enabled runs ────────
+    // When onlineSearch is true and the model has no existing variant suffix
+    // (:online, :nitro, :thinking, etc.) the suffix is appended so OpenRouter
+    // routes to a web-search-capable provider variant.
+    const onlineSearch = asBoolean(config.onlineSearch, false);
+    if (onlineSearch && !effectiveModel.includes(":")) {
+        effectiveModel = `${effectiveModel}:online`;
+    }
+    // ── agentId override — caller-supplied identity for Anthropic metadata ──────
+    // When config.agentId is provided it overrides agent.id as the identity sent
+    // to the orager daemon (JWT subject → metadata.user_id in Anthropic requests).
+    // Paperclip platform logging always uses agent.id regardless of this override.
+    const configAgentId = typeof config.agentId === "string" && config.agentId.trim()
+        ? config.agentId.trim()
+        : null;
+    const effectiveAgentId = configAgentId ?? agent.id;
     // Support both maxTurns and maxTurnsPerRun (alias for compatibility)
     const maxTurns = Math.max(0, safeNumber(config.maxTurnsPerRun ?? config.maxTurns, DEFAULT_MAX_TURNS));
     const maxRetries = Math.max(0, safeNumber(config.maxRetries, DEFAULT_MAX_RETRIES));
@@ -758,8 +945,9 @@ export async function executeAgentLoop(ctx) {
     const sandboxRoot = asString(config.sandboxRoot, "");
     const useFinishTool = asBoolean(config.useFinishTool, false);
     const profile = asString(config.profile, "").trim();
-    const settingsFile = asString(config.settingsFile, "").trim();
+    const _rawSettingsFile = asString(config.settingsFile, "").trim(); // validated after cwd is resolved
     const forceResume = asBoolean(config.forceResume, false);
+    const daemonAutoStart = asBoolean(config.daemonAutoStart, false);
     // Sampling — reject NaN/Infinity for all sampling params
     const temperature = typeof config.temperature === "number" && Number.isFinite(config.temperature) ? config.temperature : undefined;
     const top_p = typeof config.top_p === "number" && Number.isFinite(config.top_p) ? config.top_p : undefined;
@@ -846,9 +1034,14 @@ export async function executeAgentLoop(ctx) {
             .filter((t) => typeof t === "string" && t.trim().length > 0)
             .join(",")
         : "";
-    // Cost limits
-    const maxCostUsd = typeof config.maxCostUsd === "number" ? config.maxCostUsd : undefined;
-    const maxCostUsdSoft = typeof config.maxCostUsdSoft === "number" ? config.maxCostUsdSoft : undefined;
+    // Cost limits — must be positive if specified; zero/negative disables enforcement
+    // so a misconfigured value would silently turn off cost controls.
+    const maxCostUsd = typeof config.maxCostUsd === "number" && config.maxCostUsd > 0
+        ? config.maxCostUsd
+        : undefined;
+    const maxCostUsdSoft = typeof config.maxCostUsdSoft === "number" && config.maxCostUsdSoft > 0
+        ? config.maxCostUsdSoft
+        : undefined;
     const costPerInputToken = typeof config.costPerInputToken === "number"
         ? config.costPerInputToken
         : undefined;
@@ -903,6 +1096,18 @@ export async function executeAgentLoop(ctx) {
     const webhookUrl = (() => {
         const raw = typeof config.webhookUrl === "string" ? config.webhookUrl.trim() : "";
         const validated = validateHttpUrl(raw, "webhookUrl");
+        if (validated) {
+            try {
+                const wu = new URL(validated);
+                if (isLoopbackHost(wu.hostname.toLowerCase())) {
+                    void onLog("stderr", `[openrouter adapter] WARNING: config.webhookUrl '${raw.slice(0, 100)}' points to loopback — loopback SSRF guard triggered, ignoring\n`);
+                    return "";
+                }
+            }
+            catch {
+                return "";
+            }
+        }
         return validated || undefined;
     })();
     // Extended agent loop options
@@ -916,6 +1121,7 @@ export async function executeAgentLoop(ctx) {
         : undefined;
     const trackFileChanges = asBoolean(config.trackFileChanges, false);
     const enableBrowserTools = asBoolean(config.enableBrowserTools, false);
+    const readProjectInstructions = typeof config.readProjectInstructions === "boolean" ? config.readProjectInstructions : undefined;
     const hookTimeoutMs = typeof config.hookTimeoutMs === "number" && config.hookTimeoutMs > 0
         ? config.hookTimeoutMs
         : undefined;
@@ -1023,6 +1229,57 @@ export async function executeAgentLoop(ctx) {
     catch {
         // Non-fatal — spawn will fail with a clearer error if cwd is truly invalid
     }
+    // ── settingsFile validation ───────────────────────────────────────────────
+    // Relative paths must resolve within cwd (symlink-safe).
+    // Absolute paths must be under an allowlist of safe roots (default: home dir;
+    // extend via ORAGER_SETTINGS_ALLOWED_ROOTS env var, colon-separated).
+    // Null bytes are always rejected.
+    // On the daemon path settingsFile is stripped by sanitizeDaemonRunOpts anyway.
+    const settingsFile = await (async () => {
+        const raw = _rawSettingsFile;
+        if (!raw)
+            return "";
+        if (raw.includes("\x00")) {
+            void onLog("stderr", `[openrouter adapter] WARNING: settingsFile contains null bytes — ignoring\n`);
+            return "";
+        }
+        if (path.isAbsolute(raw)) {
+            // Restrict absolute paths to an allowlist of safe root directories.
+            // Default: home directory only. Operators can extend via ORAGER_SETTINGS_ALLOWED_ROOTS
+            // (colon-separated list of absolute paths).
+            const extraRoots = (process.env["ORAGER_SETTINGS_ALLOWED_ROOTS"] ?? "")
+                .split(":")
+                .map((r) => r.trim())
+                .filter(Boolean);
+            const allowedRoots = [os.homedir(), ...extraRoots];
+            const isAllowed = allowedRoots.some((root) => raw === root || raw.startsWith(root + path.sep));
+            if (!isAllowed) {
+                void onLog("stderr", `[openrouter adapter] WARNING: settingsFile '${raw}' is outside allowed roots ` +
+                    `(${allowedRoots.map((r) => `'${r}'`).join(", ")}) — ignoring. ` +
+                    `Set ORAGER_SETTINGS_ALLOWED_ROOTS to allow additional directories.\n`);
+                return "";
+            }
+            return raw;
+        }
+        const abs = path.resolve(cwd, raw);
+        let real;
+        try {
+            real = await fs.realpath(abs);
+        }
+        catch {
+            real = abs; // file may not exist yet; fall back to lexical path
+        }
+        let realCwd = cwd;
+        try {
+            realCwd = await fs.realpath(cwd);
+        }
+        catch { /* fallback */ }
+        if (!real.startsWith(realCwd + path.sep) && real !== realCwd) {
+            void onLog("stderr", `[openrouter adapter] WARNING: settingsFile '${raw}' resolves outside cwd — ignoring\n`);
+            return "";
+        }
+        return real;
+    })();
     const taskId = (typeof context.taskId === "string" && context.taskId.trim()) ||
         (typeof context.issueId === "string" && context.issueId.trim()) ||
         null;
@@ -1047,8 +1304,17 @@ export async function executeAgentLoop(ctx) {
             void onLog("stderr", `[openrouter adapter] WARNING: instructionsFilePath '${instructionsFilePath}' could not be resolved — ignoring\n`);
             return "";
         }
+        // Also realpath the cwd itself so the prefix check is correct on platforms
+        // where cwd may contain symlinks (e.g. macOS /tmp → /private/tmp).
+        let realCwd = cwd;
+        try {
+            realCwd = await fs.realpath(cwd);
+        }
+        catch {
+            // cwd doesn't exist yet or isn't accessible — fall back to raw cwd
+        }
         // Must stay within cwd (prevent ../../etc/passwd traversal)
-        if (!real.startsWith(cwd + path.sep) && real !== cwd) {
+        if (!real.startsWith(realCwd + path.sep) && real !== realCwd) {
             void onLog("stderr", `[openrouter adapter] WARNING: instructionsFilePath '${instructionsFilePath}' is outside cwd — ignoring\n`);
             return "";
         }
@@ -1108,12 +1374,26 @@ export async function executeAgentLoop(ctx) {
     const rawAttachments = Array.isArray(context.attachments)
         ? context.attachments
         : [];
-    const imageAttachments = rawAttachments.filter((a) => typeof a === "object" &&
-        a !== null &&
-        typeof a.url === "string" &&
-        /^https?:\/\//.test(a.url) &&
-        (!a.mimeType ||
-            /^image\//.test(a.mimeType)));
+    const imageAttachments = rawAttachments.filter((a) => {
+        if (typeof a !== "object" || a === null)
+            return false;
+        const att = a;
+        if (typeof att.url !== "string")
+            return false;
+        // Validate URL is well-formed http/https — catches malformed URLs like
+        // "https://[unterminated" that a simple regex would accept.
+        try {
+            const u = new URL(att.url);
+            if (u.protocol !== "https:" && u.protocol !== "http:")
+                return false;
+        }
+        catch {
+            return false;
+        }
+        if (att.mimeType !== undefined && (typeof att.mimeType !== "string" || !/^image\//.test(att.mimeType)))
+            return false;
+        return true;
+    });
     const promptContent = imageAttachments.length > 0
         ? [
             { type: "text", text: prompt },
@@ -1130,13 +1410,19 @@ export async function executeAgentLoop(ctx) {
     // don't declare vision support, but the model-level check is a separate
     // question — not all providers expose vision for every model even when the
     // base weights support it.
+    let visionFallbackNote = null;
     if (promptContent !== null) {
         const visionOk = await checkVisionSupport(apiKey, effectiveModel);
         if (visionOk === false) {
             // Model confirmed to not support vision. Try the fallback chain.
-            // visionFallbackModels: user-configurable list; [] disables fallback.
+            // visionFallbackModels controls the candidates:
+            //   • undefined/omitted → use DEFAULT_VISION_FALLBACK_MODELS
+            //   • []                → DISABLES fallback entirely (images sent as-is)
+            //   • ["model/id", …]   → use the provided list instead of the default
             // Default chain: Gemini 2.0 Flash → GPT-4o → Claude Sonnet — all
             // confirmed vision-capable on OpenRouter and ordered by cost/speed.
+            const fallbackExplicitlyDisabled = Array.isArray(config.visionFallbackModels) &&
+                config.visionFallbackModels.length === 0;
             const fallbackCandidates = Array.isArray(config.visionFallbackModels)
                 ? config.visionFallbackModels.filter((m) => typeof m === "string" && m.trim().length > 0)
                 : DEFAULT_VISION_FALLBACK_MODELS;
@@ -1153,6 +1439,7 @@ export async function executeAgentLoop(ctx) {
             if (fallbackModel) {
                 const originalModel = effectiveModel;
                 effectiveModel = fallbackModel;
+                visionFallbackNote = `vision fallback: ${originalModel} → ${fallbackModel}`;
                 // Recompute timeout for the new model (only matters when not explicitly set).
                 timeoutSec = Math.max(0, safeNumber(config.timeoutSec, defaultTimeoutForModel(effectiveModel)));
                 structuredLog({
@@ -1164,13 +1451,25 @@ export async function executeAgentLoop(ctx) {
                 void onLog("stderr", `[openrouter adapter] model "${originalModel}" does not support image inputs — falling back to "${fallbackModel}".\n`);
             }
             else {
-                // No working fallback found (or fallback disabled) — warn and proceed.
+                // No working fallback found — either all candidates lack vision or
+                // the user explicitly disabled the fallback chain with [].
+                if (fallbackExplicitlyDisabled) {
+                    visionFallbackNote = "vision fallback disabled (visionFallbackModels: [])";
+                }
+                else {
+                    visionFallbackNote = "vision: no fallback available";
+                }
                 structuredLog({
                     level: "warn", ts: Date.now(), event: "vision_not_supported",
                     agentId: agent.id, runId, model: effectiveModel,
-                    message: `Model "${effectiveModel}" does not support vision and no vision-capable fallback was available. Images may be silently stripped or cause an API error.`,
+                    fallbackDisabled: fallbackExplicitlyDisabled,
+                    message: fallbackExplicitlyDisabled
+                        ? `Model "${effectiveModel}" does not support vision and visionFallbackModels is [] (fallback disabled). Images may be silently stripped or cause an API error.`
+                        : `Model "${effectiveModel}" does not support vision and no vision-capable fallback was available. Images may be silently stripped or cause an API error.`,
                 });
-                void onLog("stderr", `[openrouter adapter] WARNING: model "${effectiveModel}" does not support image inputs and no vision fallback was available — images may be silently stripped or cause an error.\n`);
+                void onLog("stderr", fallbackExplicitlyDisabled
+                    ? `[openrouter adapter] WARNING: model "${effectiveModel}" does not support image inputs and vision fallback is disabled (visionFallbackModels: []) — images may be silently stripped or cause an error.\n`
+                    : `[openrouter adapter] WARNING: model "${effectiveModel}" does not support image inputs and no vision fallback was available — images may be silently stripped or cause an error.\n`);
             }
         }
         else if (visionOk === null) {
@@ -1190,173 +1489,200 @@ export async function executeAgentLoop(ctx) {
     // length limits on some systems and keeps the subprocess invocation clean.
     // The file is chmod 600 before writing so only the current user can read it.
     // Orager reads and immediately deletes the file before doing anything else.
-    const configObj = {
-        outputFormat: "stream-json",
-        model: effectiveModel,
-        maxTurns: maxTurns > 0 ? maxTurns : undefined,
-        maxRetries,
-        addDirs,
+    //
+    // NB: buildConfigFilePayload and buildDaemonRunOpts (further below) are both
+    // closures over the variables extracted above. Keeping them as named local
+    // functions means adding a new field only requires one change per path, and
+    // makes the two parallel representations easy to diff against each other.
+    const buildConfigFilePayload = () => {
+        const obj = {
+            outputFormat: "stream-json",
+            model: effectiveModel,
+            maxTurns: maxTurns > 0 ? maxTurns : undefined,
+            maxRetries,
+            addDirs,
+        };
+        if (previousSessionId)
+            obj.sessionId = previousSessionId;
+        if (safeInstructionsFilePath)
+            obj.systemPromptFile = safeInstructionsFilePath;
+        if (dangerouslySkipPermissions)
+            obj.dangerouslySkipPermissions = true;
+        if (sandboxRoot)
+            obj.sandboxRoot = sandboxRoot;
+        if (useFinishTool)
+            obj.useFinishTool = true;
+        if (profile)
+            obj.profile = profile;
+        if (settingsFile)
+            obj.settingsFile = settingsFile;
+        if (forceResume)
+            obj.forceResume = true;
+        if (siteUrl)
+            obj.siteUrl = siteUrl;
+        if (siteName)
+            obj.siteName = siteName;
+        // Sampling
+        if (temperature !== undefined)
+            obj.temperature = temperature;
+        if (top_p !== undefined)
+            obj.top_p = top_p;
+        if (top_k !== undefined)
+            obj.top_k = top_k;
+        if (frequency_penalty !== undefined)
+            obj.frequency_penalty = frequency_penalty;
+        if (presence_penalty !== undefined)
+            obj.presence_penalty = presence_penalty;
+        if (repetition_penalty !== undefined)
+            obj.repetition_penalty = repetition_penalty;
+        if (min_p !== undefined)
+            obj.min_p = min_p;
+        if (seed !== undefined)
+            obj.seed = seed;
+        if (stopTokens.length > 0)
+            obj.stop = stopTokens;
+        // Tool control
+        if (toolChoice)
+            obj.tool_choice = toolChoice;
+        obj.parallel_tool_calls = parallelToolCalls;
+        // Reasoning
+        if (reasoningEffort)
+            obj.reasoningEffort = reasoningEffort;
+        if (reasoningMaxTokens !== undefined)
+            obj.reasoningMaxTokens = reasoningMaxTokens;
+        if (reasoningExclude)
+            obj.reasoningExclude = true;
+        // Provider routing — pass as comma-separated strings (matching CLI format)
+        if (providerOrder)
+            obj.providerOrder = providerOrder.split(",").filter(Boolean);
+        if (providerIgnore)
+            obj.providerIgnore = providerIgnore.split(",").filter(Boolean);
+        if (providerOnly)
+            obj.providerOnly = providerOnly.split(",").filter(Boolean);
+        if (dataCollection)
+            obj.dataCollection = dataCollection;
+        if (zdr)
+            obj.zdr = true;
+        if (sort)
+            obj.sort = sort;
+        if (requireParameters)
+            obj.require_parameters = true;
+        if (quantizations)
+            obj.quantizations = quantizations.split(",").filter(Boolean);
+        if (preset)
+            obj.preset = preset;
+        // Fallback models
+        if (models.length > 0)
+            obj.models = models;
+        // Transforms
+        if (transforms)
+            obj.transforms = transforms.split(",").filter(Boolean);
+        // Cost limits
+        if (maxCostUsd !== undefined)
+            obj.maxCostUsd = maxCostUsd;
+        if (maxCostUsdSoft !== undefined)
+            obj.maxCostUsdSoft = maxCostUsdSoft;
+        if (costPerInputToken !== undefined)
+            obj.costPerInputToken = costPerInputToken;
+        if (costPerOutputToken !== undefined)
+            obj.costPerOutputToken = costPerOutputToken;
+        // Approval — requireApproval must be "all" or string[], never a boolean
+        if (effectiveRequireApproval !== undefined)
+            obj.requireApproval = effectiveRequireApproval;
+        obj.approvalMode = approvalMode;
+        if (approvalAnswer)
+            obj.approvalAnswer = approvalAnswer;
+        // Extra tools
+        if (toolsFiles.length > 0)
+            obj.toolsFiles = toolsFiles;
+        // Summarize config
+        if (summarizeAt !== undefined)
+            obj.summarizeAt = summarizeAt;
+        if (summarizeModel)
+            obj.summarizeModel = summarizeModel;
+        if (summarizeKeepRecentTurns !== undefined)
+            obj.summarizeKeepRecentTurns = summarizeKeepRecentTurns;
+        // Extended agent loop options
+        if (tagToolOutputs !== undefined)
+            obj.tagToolOutputs = tagToolOutputs;
+        if (planMode)
+            obj.planMode = true;
+        if (injectContext)
+            obj.injectContext = true;
+        if (Object.keys(bashPolicy).length > 0)
+            obj.bashPolicy = bashPolicy;
+        if (trackFileChanges)
+            obj.trackFileChanges = true;
+        if (enableBrowserTools)
+            obj.enableBrowserTools = true;
+        if (readProjectInstructions !== undefined)
+            obj.readProjectInstructions = readProjectInstructions;
+        if (turnModelRules)
+            obj.turnModelRules = turnModelRules;
+        if (summarizePrompt)
+            obj.summarizePrompt = summarizePrompt;
+        if (summarizeFallbackKeep !== undefined)
+            obj.summarizeFallbackKeep = summarizeFallbackKeep;
+        if (webhookUrl)
+            obj.webhookUrl = webhookUrl;
+        if (hooks)
+            obj.hooks = hooks;
+        if (hookTimeoutMs !== undefined)
+            obj.hookTimeoutMs = hookTimeoutMs;
+        if (hookErrorMode !== undefined)
+            obj.hookErrorMode = hookErrorMode;
+        if (approvalTimeoutMs !== undefined)
+            obj.approvalTimeoutMs = approvalTimeoutMs;
+        if (mcpServers)
+            obj.mcpServers = mcpServers;
+        if (requireMcpServers && requireMcpServers.length > 0)
+            obj.requireMcpServers = requireMcpServers;
+        if (toolTimeouts)
+            obj.toolTimeouts = toolTimeouts;
+        if (maxSpawnDepth !== undefined)
+            obj.maxSpawnDepth = maxSpawnDepth;
+        if (maxIdenticalToolCallTurns !== undefined)
+            obj.maxIdenticalToolCallTurns = maxIdenticalToolCallTurns;
+        if (toolErrorBudgetHardStop)
+            obj.toolErrorBudgetHardStop = true;
+        // Multimodal prompt content
+        if (promptContent)
+            obj.promptContent = promptContent;
+        // Run-level timeout — orager self-terminates via AbortSignal.timeout() when exceeded.
+        // The adapter's outer process timeout (timeoutSec + 10s grace) remains as belt-and-suspenders.
+        obj.timeoutSec = timeoutSec;
+        // Full API key pool — orager rotates through these on 429 errors internally.
+        if (apiKeyPool.length > 1)
+            obj.apiKeys = apiKeyPool;
+        // Required env vars — pass through so orager also validates (belt-and-suspenders
+        // for the spawn path; adapter-level check above handles daemon path).
+        if (requiredEnvVars.length > 0)
+            obj.requiredEnvVars = requiredEnvVars;
+        obj.memoryKey = buildMemoryKey(effectiveAgentId, workspaceRepoUrl);
+        // Per-agent API key isolation
+        const _agentApiKey = asString(config.agentApiKey, "");
+        if (_agentApiKey.trim())
+            obj.agentApiKey = _agentApiKey.trim();
+        const _memoryRetrieval = asString(config.memoryRetrieval, "");
+        if (_memoryRetrieval === "embedding" || _memoryRetrieval === "fts" || _memoryRetrieval === "local") {
+            obj.memoryRetrieval = _memoryRetrieval;
+            if (_memoryRetrieval === "embedding") {
+                const embModel = asString(config.memoryEmbeddingModel, "");
+                if (embModel)
+                    obj.memoryEmbeddingModel = embModel;
+            }
+        }
+        const _memoryMaxChars = asNumber(config.memoryMaxChars, 0);
+        if (_memoryMaxChars > 0)
+            obj.memoryMaxChars = _memoryMaxChars;
+        // Response format (JSON healing)
+        const _responseFormat = parseObject(config.responseFormat);
+        if (typeof _responseFormat.type === "string" && _responseFormat.type) {
+            obj.response_format = _responseFormat;
+        }
+        return obj;
     };
-    if (previousSessionId)
-        configObj.sessionId = previousSessionId;
-    if (safeInstructionsFilePath)
-        configObj.systemPromptFile = safeInstructionsFilePath;
-    if (dangerouslySkipPermissions)
-        configObj.dangerouslySkipPermissions = true;
-    if (sandboxRoot)
-        configObj.sandboxRoot = sandboxRoot;
-    if (useFinishTool)
-        configObj.useFinishTool = true;
-    if (profile)
-        configObj.profile = profile;
-    if (settingsFile)
-        configObj.settingsFile = settingsFile;
-    if (forceResume)
-        configObj.forceResume = true;
-    if (siteUrl)
-        configObj.siteUrl = siteUrl;
-    if (siteName)
-        configObj.siteName = siteName;
-    // Sampling
-    if (temperature !== undefined)
-        configObj.temperature = temperature;
-    if (top_p !== undefined)
-        configObj.top_p = top_p;
-    if (top_k !== undefined)
-        configObj.top_k = top_k;
-    if (frequency_penalty !== undefined)
-        configObj.frequency_penalty = frequency_penalty;
-    if (presence_penalty !== undefined)
-        configObj.presence_penalty = presence_penalty;
-    if (repetition_penalty !== undefined)
-        configObj.repetition_penalty = repetition_penalty;
-    if (min_p !== undefined)
-        configObj.min_p = min_p;
-    if (seed !== undefined)
-        configObj.seed = seed;
-    if (stopTokens.length > 0)
-        configObj.stop = stopTokens;
-    // Tool control
-    if (toolChoice)
-        configObj.tool_choice = toolChoice;
-    configObj.parallel_tool_calls = parallelToolCalls;
-    // Reasoning
-    if (reasoningEffort)
-        configObj.reasoningEffort = reasoningEffort;
-    if (reasoningMaxTokens !== undefined)
-        configObj.reasoningMaxTokens = reasoningMaxTokens;
-    if (reasoningExclude)
-        configObj.reasoningExclude = true;
-    // Provider routing — pass as comma-separated strings (matching CLI format)
-    if (providerOrder)
-        configObj.providerOrder = providerOrder.split(",").filter(Boolean);
-    if (providerIgnore)
-        configObj.providerIgnore = providerIgnore.split(",").filter(Boolean);
-    if (providerOnly)
-        configObj.providerOnly = providerOnly.split(",").filter(Boolean);
-    if (dataCollection)
-        configObj.dataCollection = dataCollection;
-    if (zdr)
-        configObj.zdr = true;
-    if (sort)
-        configObj.sort = sort;
-    if (requireParameters)
-        configObj.require_parameters = true;
-    if (quantizations)
-        configObj.quantizations = quantizations.split(",").filter(Boolean);
-    if (preset)
-        configObj.preset = preset;
-    // Fallback models
-    if (models.length > 0)
-        configObj.models = models;
-    // Transforms
-    if (transforms)
-        configObj.transforms = transforms.split(",").filter(Boolean);
-    // Cost limits
-    if (maxCostUsd !== undefined)
-        configObj.maxCostUsd = maxCostUsd;
-    if (maxCostUsdSoft !== undefined)
-        configObj.maxCostUsdSoft = maxCostUsdSoft;
-    if (costPerInputToken !== undefined)
-        configObj.costPerInputToken = costPerInputToken;
-    if (costPerOutputToken !== undefined)
-        configObj.costPerOutputToken = costPerOutputToken;
-    // Approval — requireApproval must be "all" or string[], never a boolean
-    if (effectiveRequireApproval !== undefined)
-        configObj.requireApproval = effectiveRequireApproval;
-    configObj.approvalMode = approvalMode;
-    if (approvalAnswer)
-        configObj.approvalAnswer = approvalAnswer;
-    // Extra tools
-    if (toolsFiles.length > 0)
-        configObj.toolsFiles = toolsFiles;
-    // Summarize config
-    if (summarizeAt !== undefined)
-        configObj.summarizeAt = summarizeAt;
-    if (summarizeModel)
-        configObj.summarizeModel = summarizeModel;
-    if (summarizeKeepRecentTurns !== undefined)
-        configObj.summarizeKeepRecentTurns = summarizeKeepRecentTurns;
-    // Extended agent loop options
-    if (tagToolOutputs !== undefined)
-        configObj.tagToolOutputs = tagToolOutputs;
-    if (planMode)
-        configObj.planMode = true;
-    if (injectContext)
-        configObj.injectContext = true;
-    if (Object.keys(bashPolicy).length > 0)
-        configObj.bashPolicy = bashPolicy;
-    if (trackFileChanges)
-        configObj.trackFileChanges = true;
-    if (enableBrowserTools)
-        configObj.enableBrowserTools = true;
-    if (turnModelRules)
-        configObj.turnModelRules = turnModelRules;
-    if (summarizePrompt)
-        configObj.summarizePrompt = summarizePrompt;
-    if (summarizeFallbackKeep !== undefined)
-        configObj.summarizeFallbackKeep = summarizeFallbackKeep;
-    if (webhookUrl)
-        configObj.webhookUrl = webhookUrl;
-    if (hooks)
-        configObj.hooks = hooks;
-    if (hookTimeoutMs !== undefined)
-        configObj.hookTimeoutMs = hookTimeoutMs;
-    if (hookErrorMode !== undefined)
-        configObj.hookErrorMode = hookErrorMode;
-    if (approvalTimeoutMs !== undefined)
-        configObj.approvalTimeoutMs = approvalTimeoutMs;
-    if (mcpServers)
-        configObj.mcpServers = mcpServers;
-    if (requireMcpServers && requireMcpServers.length > 0)
-        configObj.requireMcpServers = requireMcpServers;
-    if (toolTimeouts)
-        configObj.toolTimeouts = toolTimeouts;
-    if (maxSpawnDepth !== undefined)
-        configObj.maxSpawnDepth = maxSpawnDepth;
-    if (maxIdenticalToolCallTurns !== undefined)
-        configObj.maxIdenticalToolCallTurns = maxIdenticalToolCallTurns;
-    if (toolErrorBudgetHardStop)
-        configObj.toolErrorBudgetHardStop = true;
-    // Multimodal prompt content
-    if (promptContent)
-        configObj.promptContent = promptContent;
-    // Run-level timeout — orager self-terminates via AbortSignal.timeout() when exceeded.
-    // The adapter's outer process timeout (timeoutSec + 10s grace) remains as belt-and-suspenders.
-    configObj.timeoutSec = timeoutSec;
-    // Full API key pool — orager rotates through these on 429 errors internally.
-    if (apiKeyPool.length > 1)
-        configObj.apiKeys = apiKeyPool;
-    // Required env vars — pass through so orager also validates (belt-and-suspenders
-    // for the spawn path; adapter-level check above handles daemon path).
-    if (requiredEnvVars.length > 0)
-        configObj.requiredEnvVars = requiredEnvVars;
-    configObj.memoryKey = agent.id;
-    // Response format (JSON healing)
-    const responseFormat = parseObject(config.responseFormat);
-    if (typeof responseFormat.type === "string" && responseFormat.type) {
-        configObj.response_format = responseFormat;
-    }
+    const configObj = buildConfigFilePayload();
     // Write config to a crypto-random temp file, chmod 600 before writing content
     const configFileName = `orager-config-${crypto.randomBytes(16).toString("hex")}.json`;
     const configFilePath = path.join(os.tmpdir(), configFileName);
@@ -1377,6 +1703,60 @@ export async function executeAgentLoop(ctx) {
             signal: null,
             timedOut: false,
             errorMessage: `Failed to write orager config file: ${err instanceof Error ? err.message : String(err)}`,
+            errorCode: "config_error",
+        };
+    }
+    // Security: block dangerous flags that could bypass security controls, override
+    // adapter config, or change the process mode. Must stay in sync with orager CLI
+    // flag names. Categories:
+    //   • Security bypass:   --dangerously-skip-permissions
+    //   • Config override:   --config-file, --settings-file
+    //   • Session hijack:    --resume (could load another user's session history)
+    //   • Model override:    --model (could redirect conversation to attacker-controlled endpoint)
+    //   • Prompt injection:  --system-prompt-file (could inject arbitrary system prompt from disk)
+    //   • Output control:    --output-format (adapter controls output format)
+    //   • Daemon/proc mode:  --serve, --port, --max-concurrent, --idle-timeout, --allowed-cwd
+    //   • Subcommands:       --status, --sessions, --list-sessions, --search-sessions,
+    //                        --trash-session, --restore-session, --delete-session,
+    //                        --delete-trashed, --rollback-session, --prune-sessions,
+    //                        --rotate-key, --clear-model-cache
+    const BLOCKED_EXTRA_ARGS = new Set([
+        "--dangerously-skip-permissions",
+        "--config-file",
+        "--settings-file",
+        "--resume",
+        "--model",
+        "--system-prompt-file",
+        "--output-format",
+        "--serve",
+        "--port",
+        "--max-concurrent",
+        "--idle-timeout",
+        "--allowed-cwd",
+        "--status",
+        "--sessions",
+        "--list-sessions",
+        "--search-sessions",
+        "--trash-session",
+        "--restore-session",
+        "--delete-session",
+        "--delete-trashed",
+        "--rollback-session",
+        "--prune-sessions",
+        "--rotate-key",
+        "--clear-model-cache",
+    ]);
+    // Also catch "--flag=value" variants (e.g. "--config-file=/tmp/evil").
+    const blockedFound = extraArgs.filter((a) => [...BLOCKED_EXTRA_ARGS].some(flag => a === flag || a.startsWith(flag + "=")));
+    if (blockedFound.length > 0) {
+        structuredLog({ level: "error", ts: Date.now(), event: "blocked_extra_args", agentId: agent.id, runId, message: `config.extraArgs contains forbidden flags: ${blockedFound.join(", ")}` });
+        if (configFileWritten)
+            await fs.unlink(configFilePath).catch(() => { });
+        return {
+            exitCode: 1,
+            signal: null,
+            timedOut: false,
+            errorMessage: `config.extraArgs contains forbidden flags: ${blockedFound.join(", ")}. These flags bypass security controls and are not permitted.`,
             errorCode: "config_error",
         };
     }
@@ -1476,6 +1856,9 @@ export async function executeAgentLoop(ctx) {
     const missingVars = checkRequiredEnvVars(requiredEnvVars, effectiveEnv);
     if (missingVars.length > 0) {
         structuredLog({ level: "error", ts: Date.now(), event: "env_var_missing", agentId: agent.id, runId, message: `Missing: ${missingVars.join(", ")}` });
+        // Clean up the config file — orager will never run to delete it for us
+        if (configFileWritten)
+            await fs.unlink(configFilePath).catch(() => { });
         return {
             exitCode: 1,
             signal: null,
@@ -1517,6 +1900,7 @@ export async function executeAgentLoop(ctx) {
                 ...(safeInstructionsFilePath
                     ? [`instructions: ${safeInstructionsFilePath}`]
                     : []),
+                ...(visionFallbackNote ? [visionFallbackNote] : []),
             ],
             env: redactEnvForLogs(env),
             prompt,
@@ -1544,7 +1928,7 @@ export async function executeAgentLoop(ctx) {
         try {
             const u = new URL(_rawDaemonUrl);
             const host = u.hostname.toLowerCase();
-            const isLoopback = host === "localhost" || host === "127.0.0.1" || host === "::1" || /^127\./.test(host);
+            const isLoopback = isLoopbackHost(host);
             if (!isLoopback) {
                 void onLog("stderr", `[openrouter adapter] WARNING: ignoring non-loopback daemonUrl '${_rawDaemonUrl}' — daemon must be on localhost\n`);
                 return "";
@@ -1562,108 +1946,126 @@ export async function executeAgentLoop(ctx) {
             structuredLog({ level: "warn", ts: Date.now(), event: "daemon_circuit_open", agentId: agent.id, runId });
         }
         else {
-            let signingKey = await readDaemonSigningKey(onLog);
+            const daemonKeyFilePath = asString(config.daemonKeyFile ?? config.daemonKeyPath, "").trim();
+            let signingKey = await readDaemonSigningKey(onLog, daemonKeyFilePath || undefined);
             let alive = signingKey ? await isDaemonAlive(daemonBaseUrl) : false;
             if (!alive) {
-                alive = await tryAutoStartDaemon(daemonBaseUrl, cliPath, apiKey, effectiveEnv, onLog);
+                alive = await tryAutoStartDaemon(daemonBaseUrl, cliPath, apiKey, effectiveEnv, onLog, daemonAutoStart);
                 if (alive) {
                     // Re-read signing key in case it was just generated
-                    signingKey = await readDaemonSigningKey(onLog);
+                    signingKey = await readDaemonSigningKey(onLog, daemonKeyFilePath || undefined);
                 }
             }
             if (alive && signingKey) {
-                // Build opts for daemon — includes apiKey so key rotation takes effect
-                const daemonOpts = {
-                    apiKey,
-                    model: effectiveModel,
-                    models: models.length > 0 ? models : undefined,
-                    sessionId: previousSessionId || null,
-                    addDirs,
-                    maxTurns: maxTurns > 0 ? maxTurns : 0,
-                    maxRetries,
-                    cwd,
-                    dangerouslySkipPermissions,
-                    forceResume: forceResume || undefined,
-                    verbose: false,
-                    useFinishTool,
-                    profile: profile || undefined,
-                    settingsFile: settingsFile || undefined,
-                    siteUrl: siteUrl || undefined,
-                    siteName: siteName || undefined,
-                    sandboxRoot: sandboxRoot || undefined,
-                    parallel_tool_calls: parallelToolCalls,
-                    tool_choice: toolChoice || undefined,
-                    temperature,
-                    top_p,
-                    top_k,
-                    frequency_penalty,
-                    presence_penalty,
-                    repetition_penalty,
-                    min_p,
-                    seed,
-                    stop: stopTokens.length > 0 ? stopTokens : undefined,
-                    reasoning: (reasoningEffort || reasoningMaxTokens || reasoningExclude)
-                        ? {
-                            ...(reasoningEffort ? { effort: reasoningEffort } : {}),
-                            ...(reasoningMaxTokens ? { max_tokens: reasoningMaxTokens } : {}),
-                            ...(reasoningExclude ? { exclude: true } : {}),
-                        }
-                        : undefined,
-                    provider: (providerOrder || providerIgnore || providerOnly || dataCollection || zdr || sort || quantizations || requireParameters)
-                        ? {
-                            ...(providerOrder ? { order: providerOrder.split(",").filter(Boolean) } : {}),
-                            ...(providerIgnore ? { ignore: providerIgnore.split(",").filter(Boolean) } : {}),
-                            ...(providerOnly ? { only: providerOnly.split(",").filter(Boolean) } : {}),
-                            ...(dataCollection ? { data_collection: dataCollection } : {}),
-                            ...(zdr ? { zdr: true } : {}),
-                            ...(sort ? { sort } : {}),
-                            ...(quantizations ? { quantizations: quantizations.split(",").filter(Boolean) } : {}),
-                            ...(requireParameters ? { require_parameters: true } : {}),
-                        }
-                        : undefined,
-                    preset: preset || undefined,
-                    transforms: transforms ? transforms.split(",").filter(Boolean) : undefined,
-                    maxCostUsd,
-                    maxCostUsdSoft,
-                    costPerInputToken,
-                    costPerOutputToken,
-                    requireApproval: effectiveRequireApproval,
-                    summarizeAt,
-                    summarizeModel: summarizeModel || undefined,
-                    summarizeKeepRecentTurns,
-                    tagToolOutputs,
-                    planMode: planMode || undefined,
-                    injectContext: injectContext || undefined,
-                    bashPolicy: Object.keys(bashPolicy).length > 0 ? bashPolicy : undefined,
-                    trackFileChanges: trackFileChanges || undefined,
-                    enableBrowserTools: enableBrowserTools || undefined,
-                    turnModelRules,
-                    summarizePrompt,
-                    summarizeFallbackKeep,
-                    webhookUrl,
-                    hooks,
-                    hookTimeoutMs,
-                    hookErrorMode,
-                    approvalTimeoutMs,
-                    mcpServers,
-                    requireMcpServers: requireMcpServers && requireMcpServers.length > 0 ? requireMcpServers : undefined,
-                    toolTimeouts,
-                    maxSpawnDepth,
-                    maxIdenticalToolCallTurns,
-                    toolErrorBudgetHardStop,
-                    appendSystemPrompt: safeInstructionsFilePath
-                        ? await fs.readFile(safeInstructionsFilePath, "utf8").catch(() => undefined)
-                        : undefined,
-                    promptContent: promptContent ?? undefined,
-                    approvalMode,
-                    ...(approvalAnswer ? { approvalAnswer } : {}),
-                    ...(typeof responseFormat.type === "string" && responseFormat.type ? { response_format: responseFormat } : {}),
-                    timeoutSec,
-                    ...(apiKeyPool.length > 1 ? { apiKeys: apiKeyPool } : {}),
-                    ...(requiredEnvVars.length > 0 ? { requiredEnvVars } : {}),
-                    memoryKey: agent.id,
+                // Build opts for daemon path — parallel to buildConfigFilePayload above.
+                // Uses the same extracted variables but structures provider/reasoning as
+                // nested objects (DaemonRunOpts shape) instead of flat config-file fields.
+                const buildDaemonRunOpts = async () => {
+                    const _responseFormat = parseObject(config.responseFormat);
+                    return {
+                        apiKey,
+                        model: effectiveModel,
+                        models: models.length > 0 ? models : undefined,
+                        sessionId: previousSessionId || null,
+                        addDirs,
+                        maxTurns: maxTurns > 0 ? maxTurns : 0,
+                        maxRetries,
+                        cwd,
+                        dangerouslySkipPermissions,
+                        forceResume: forceResume || undefined,
+                        verbose: false,
+                        useFinishTool,
+                        profile: profile || undefined,
+                        settingsFile: settingsFile || undefined,
+                        siteUrl: siteUrl || undefined,
+                        siteName: siteName || undefined,
+                        sandboxRoot: sandboxRoot || undefined,
+                        parallel_tool_calls: parallelToolCalls,
+                        tool_choice: toolChoice || undefined,
+                        temperature,
+                        top_p,
+                        top_k,
+                        frequency_penalty,
+                        presence_penalty,
+                        repetition_penalty,
+                        min_p,
+                        seed,
+                        stop: stopTokens.length > 0 ? stopTokens : undefined,
+                        reasoning: (reasoningEffort || reasoningMaxTokens || reasoningExclude)
+                            ? {
+                                ...(reasoningEffort ? { effort: reasoningEffort } : {}),
+                                ...(reasoningMaxTokens ? { max_tokens: reasoningMaxTokens } : {}),
+                                ...(reasoningExclude ? { exclude: true } : {}),
+                            }
+                            : undefined,
+                        provider: (providerOrder || providerIgnore || providerOnly || dataCollection || zdr || sort || quantizations || requireParameters)
+                            ? {
+                                ...(providerOrder ? { order: providerOrder.split(",").filter(Boolean) } : {}),
+                                ...(providerIgnore ? { ignore: providerIgnore.split(",").filter(Boolean) } : {}),
+                                ...(providerOnly ? { only: providerOnly.split(",").filter(Boolean) } : {}),
+                                ...(dataCollection ? { data_collection: dataCollection } : {}),
+                                ...(zdr ? { zdr: true } : {}),
+                                ...(sort ? { sort } : {}),
+                                ...(quantizations ? { quantizations: quantizations.split(",").filter(Boolean) } : {}),
+                                ...(requireParameters ? { require_parameters: true } : {}),
+                            }
+                            : undefined,
+                        preset: preset || undefined,
+                        transforms: transforms ? transforms.split(",").filter(Boolean) : undefined,
+                        maxCostUsd,
+                        maxCostUsdSoft,
+                        costPerInputToken,
+                        costPerOutputToken,
+                        requireApproval: effectiveRequireApproval,
+                        summarizeAt,
+                        summarizeModel: summarizeModel || undefined,
+                        summarizeKeepRecentTurns,
+                        tagToolOutputs,
+                        planMode: planMode || undefined,
+                        injectContext: injectContext || undefined,
+                        bashPolicy: Object.keys(bashPolicy).length > 0 ? bashPolicy : undefined,
+                        trackFileChanges: trackFileChanges || undefined,
+                        enableBrowserTools: enableBrowserTools || undefined,
+                        readProjectInstructions,
+                        turnModelRules,
+                        summarizePrompt,
+                        summarizeFallbackKeep,
+                        webhookUrl,
+                        hooks,
+                        hookTimeoutMs,
+                        hookErrorMode,
+                        approvalTimeoutMs,
+                        mcpServers,
+                        requireMcpServers: requireMcpServers && requireMcpServers.length > 0 ? requireMcpServers : undefined,
+                        toolTimeouts,
+                        maxSpawnDepth,
+                        maxIdenticalToolCallTurns,
+                        toolErrorBudgetHardStop,
+                        appendSystemPrompt: safeInstructionsFilePath
+                            ? await fs.readFile(safeInstructionsFilePath, "utf8").catch(() => undefined)
+                            : undefined,
+                        promptContent: promptContent ?? undefined,
+                        approvalMode,
+                        ...(approvalAnswer ? { approvalAnswer } : {}),
+                        ...(typeof _responseFormat.type === "string" && _responseFormat.type ? { response_format: _responseFormat } : {}),
+                        timeoutSec,
+                        ...(apiKeyPool.length > 1 ? { apiKeys: apiKeyPool } : {}),
+                        ...(requiredEnvVars.length > 0 ? { requiredEnvVars } : {}),
+                        ...(asString(config.agentApiKey, "").trim() ? { agentApiKey: asString(config.agentApiKey, "").trim() } : {}),
+                        memoryKey: buildMemoryKey(effectiveAgentId, workspaceRepoUrl),
+                        ...(["embedding", "fts", "local"].includes(asString(config.memoryRetrieval, ""))
+                            ? {
+                                memoryRetrieval: asString(config.memoryRetrieval, ""),
+                                ...(asString(config.memoryRetrieval, "") === "embedding" && asString(config.memoryEmbeddingModel, "")
+                                    ? { memoryEmbeddingModel: asString(config.memoryEmbeddingModel, "") }
+                                    : {}),
+                            }
+                            : {}),
+                        ...(asNumber(config.memoryMaxChars, 0) > 0 ? { memoryMaxChars: asNumber(config.memoryMaxChars, 0) } : {}),
+                    };
                 };
-                const daemonResult = await executeViaDaemon(daemonBaseUrl, signingKey, agent.id, prompt, promptContent, daemonOpts, timeoutSec, onLog, maxCostUsdSoft);
+                const daemonOpts = await buildDaemonRunOpts();
+                const daemonResult = await executeViaDaemon(daemonBaseUrl, signingKey, effectiveAgentId, prompt, promptContent, daemonOpts, timeoutSec, onLog, maxCostUsdSoft);
                 if (daemonResult !== null) {
                     structuredLog({
                         level: "info",
@@ -1677,6 +2079,7 @@ export async function executeAgentLoop(ctx) {
                         inputTokens: daemonResult.usage?.inputTokens,
                         outputTokens: daemonResult.usage?.outputTokens,
                         cachedInputTokens: daemonResult.usage?.cachedInputTokens,
+                        cacheWriteInputTokens: typeof daemonResult.resultJson?.cacheWriteInputTokens === "number" ? daemonResult.resultJson.cacheWriteInputTokens : undefined,
                         cacheHitRatio: typeof daemonResult.resultJson?.cacheHitRatio === "number" ? daemonResult.resultJson.cacheHitRatio : undefined,
                         costUsd: daemonResult.costUsd ?? undefined,
                         turnCount: typeof daemonResult.resultJson?.turnCount === "number" ? daemonResult.resultJson.turnCount : undefined,
@@ -1777,8 +2180,9 @@ export async function executeAgentLoop(ctx) {
             proc.stdin?.write(prompt, "utf8");
             proc.stdin?.end();
         }
-        catch {
-            // stdin write failure is non-fatal; the process may still produce output
+        catch (stdinErr) {
+            // stdin write failure (e.g. EPIPE) — log so operators can diagnose
+            void onLog("stderr", `[openrouter adapter] WARNING: stdin write failed (${stdinErr instanceof Error ? stdinErr.message : String(stdinErr)}) — orager may not have received the prompt\n`);
         }
         let resultEvent = null;
         let questionEvent = null;
@@ -1793,7 +2197,12 @@ export async function executeAgentLoop(ctx) {
                 timedOut = true;
                 // Kill the entire process group to clean up orager subprocesses
                 try {
-                    process.kill(-(proc.pid), "SIGTERM");
+                    if (proc.pid != null) {
+                        process.kill(-proc.pid, "SIGTERM");
+                    }
+                    else {
+                        proc.kill("SIGTERM");
+                    }
                 }
                 catch {
                     proc.kill("SIGTERM");
@@ -1802,7 +2211,12 @@ export async function executeAgentLoop(ctx) {
                 if (graceSec > 0) {
                     graceTimer = setTimeout(() => {
                         try {
-                            process.kill(-(proc.pid), "SIGKILL");
+                            if (proc.pid != null) {
+                                process.kill(-proc.pid, "SIGKILL");
+                            }
+                            else {
+                                proc.kill("SIGKILL");
+                            }
                         }
                         catch {
                             proc.kill("SIGKILL");
@@ -1952,6 +2366,7 @@ export async function executeAgentLoop(ctx) {
                 inputTokens: spawnResult.usage?.inputTokens,
                 outputTokens: spawnResult.usage?.outputTokens,
                 cachedInputTokens: spawnResult.usage?.cachedInputTokens,
+                cacheWriteInputTokens: typeof spawnResult.resultJson?.cacheWriteInputTokens === "number" ? spawnResult.resultJson.cacheWriteInputTokens : undefined,
                 cacheHitRatio: typeof spawnResult.resultJson?.cacheHitRatio === "number" ? spawnResult.resultJson.cacheHitRatio : undefined,
                 costUsd: spawnCostUsd,
                 turnCount: typeof spawnResult.resultJson?.turnCount === "number" ? spawnResult.resultJson.turnCount : undefined,
@@ -1980,6 +2395,7 @@ export async function executeAgentLoop(ctx) {
 // ── Test helpers (exported for unit tests only) ───────────────────────────────
 export function _resetStateForTesting() {
     _costWindow.length = 0;
+    _runsSinceLastAnomaly = COST_ANOMALY_COOLDOWN_RUNS; // reset cooldown to "ready"
     _visionCache.clear();
     _daemonCircuitState.clear();
     _lastAutoStartAttemptMs = 0;
@@ -1990,7 +2406,7 @@ export function _resetStateForTesting() {
 export function _drainStructuredLogForTesting() {
     return _structuredLogBuffer.splice(0);
 }
-export { buildApiKeyPool, recordRunCost, checkCostAnomaly, DEFAULT_MODEL, DAEMON_KEY_PATH, DAEMON_KEY_MAX_AGE_MS, isDaemonCircuitOpen, recordDaemonFailure, recordDaemonSuccess, DAEMON_CB_THRESHOLD, DAEMON_CB_RESET_MS, buildAdapterResult, _lastAutoStartAttemptMs, AUTO_START_COOLDOWN_MS, };
+export { buildApiKeyPool, recordRunCost, checkCostAnomaly, DEFAULT_MODEL, DAEMON_KEY_PATH, DAEMON_KEY_MAX_AGE_MS, isDaemonCircuitOpen, recordDaemonFailure, recordDaemonSuccess, DAEMON_CB_THRESHOLD, DAEMON_CB_RESET_MS, buildAdapterResult, processRateLimitTracker, _lastAutoStartAttemptMs, AUTO_START_COOLDOWN_MS, COST_ANOMALY_COOLDOWN_RUNS, };
 // ── Vision cache pre-warm ─────────────────────────────────────────────────
 // When the live model list is already populated (e.g. from a prior
 // listOpenRouterModels() call triggered by the UI dropdown), the vision

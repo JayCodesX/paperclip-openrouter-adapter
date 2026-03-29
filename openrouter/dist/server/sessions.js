@@ -18,11 +18,15 @@ import path from "node:path";
 import { mintDaemonJwt as mintJwt } from "./jwt-utils.js";
 // mintJwt is imported from ./jwt-utils.js as mintDaemonJwt
 // ── Filesystem fallback ───────────────────────────────────────────────────────
-const SESSIONS_DIR = path.join(os.homedir(), ".orager", "sessions");
+// Re-evaluated on each use so that ORAGER_SESSIONS_DIR set after module import
+// (e.g. in tests or CI) is respected — mirrors orager's getSessionsDir().
+function getSessionsDir() {
+    return process.env["ORAGER_SESSIONS_DIR"] ?? path.join(os.homedir(), ".orager", "sessions");
+}
 async function listSessionsFromFilesystem(limit, offset) {
     let entries;
     try {
-        entries = await fs.readdir(SESSIONS_DIR);
+        entries = await fs.readdir(getSessionsDir());
     }
     catch {
         return { sessions: [], total: 0, limit, offset };
@@ -33,7 +37,7 @@ async function listSessionsFromFilesystem(limit, offset) {
     // then only parse the files we actually need for the requested page.
     const withMtimes = await Promise.all(sessionFiles.map(async (file) => {
         try {
-            const stat = await fs.stat(path.join(SESSIONS_DIR, file));
+            const stat = await fs.stat(path.join(getSessionsDir(), file));
             return { file, mtime: stat.mtimeMs };
         }
         catch {
@@ -46,7 +50,7 @@ async function listSessionsFromFilesystem(limit, offset) {
     const summaries = [];
     for (const { file } of pageFiles) {
         try {
-            const raw = await fs.readFile(path.join(SESSIONS_DIR, file), "utf8");
+            const raw = await fs.readFile(path.join(getSessionsDir(), file), "utf8");
             const data = JSON.parse(raw);
             if (!data.sessionId || data.trashed)
                 continue;
@@ -72,7 +76,7 @@ async function listSessionsFromFilesystem(limit, offset) {
 async function searchSessionsFromFilesystem(query, limit) {
     let entries;
     try {
-        entries = await fs.readdir(SESSIONS_DIR);
+        entries = await fs.readdir(getSessionsDir());
     }
     catch {
         return { sessions: [], total: 0, query };
@@ -82,7 +86,7 @@ async function searchSessionsFromFilesystem(query, limit) {
     const matches = [];
     for (const file of sessionFiles) {
         try {
-            const raw = await fs.readFile(path.join(SESSIONS_DIR, file), "utf8");
+            const raw = await fs.readFile(path.join(getSessionsDir(), file), "utf8");
             const data = JSON.parse(raw);
             if (!data.sessionId || data.trashed)
                 continue;
@@ -174,7 +178,7 @@ export async function getOragerSession(sessionId, opts = {}) {
         // Validate sessionId to prevent path traversal (e.g. "../../etc/passwd")
         if (!/^[a-zA-Z0-9_-]+$/.test(sessionId))
             return null;
-        const raw = await fs.readFile(path.join(SESSIONS_DIR, `${sessionId}.json`), "utf8");
+        const raw = await fs.readFile(path.join(getSessionsDir(), `${sessionId}.json`), "utf8");
         const data = JSON.parse(raw);
         if (!data.sessionId || data.trashed)
             return null;

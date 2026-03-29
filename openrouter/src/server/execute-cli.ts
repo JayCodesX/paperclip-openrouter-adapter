@@ -7,6 +7,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { mintDaemonJwt } from "./jwt-utils.js";
 import { getModelFromLiveCache, _resetModelCacheForTesting } from "./list-models.js";
+import { processRateLimitTracker } from "../rate-limit-tracker.js";
 
 // ── Structured logging ────────────────────────────────────────────────────────
 // When ORAGER_LOG_FILE is set, JSON structured log lines are appended to that
@@ -771,6 +772,8 @@ async function executeViaDaemon(
   // 429 = rate-limited. Respect Retry-After header and retry once, then fall
   // back to spawn. Unlike 503 (capacity), 429 means the API key is rate-limited;
   // retrying quickly would just receive another 429.
+  // The process-level processRateLimitTracker is updated so callers can check
+  // rate-limit state and so the gate activates on the next request if needed.
   if (response.status === 429) {
     const retryAfterSec = Math.min(
       Math.max(parseInt(response.headers.get("Retry-After") ?? "10", 10) || 10, 1),
@@ -778,6 +781,8 @@ async function executeViaDaemon(
     );
     const maxWaitMs = timeoutSec > 0 ? Math.max(Math.floor((timeoutSec * 1000) / 2), 1000) : 60_000;
     const waitMs = Math.min(retryAfterSec * 1000, maxWaitMs);
+    processRateLimitTracker.recordRateLimit(waitMs);
+    processRateLimitTracker.updateFromHeaders(response.headers);
     structuredLog({ level: "warn", ts: Date.now(), event: "daemon_rate_limited", agentId, runId: "", waitMs, message: `Daemon rate-limited (429), retrying in ${Math.round(waitMs / 1000)}s` });
     void onLog("stderr", `[openrouter adapter] daemon rate-limited — retrying in ${Math.round(waitMs / 1000)}s\n`);
     await new Promise<void>((r) => setTimeout(r, waitMs));
@@ -823,6 +828,9 @@ async function executeViaDaemon(
       errorCode: isAuth ? "auth_error" : "daemon_error",
     };
   }
+
+  // Successful response — clear any recorded rate-limit back-off state.
+  processRateLimitTracker.clearRateLimit();
 
   if (!response.body) {
     return {
@@ -1191,6 +1199,25 @@ export async function executeAgentLoop(
       message: `wakeReasonModels: routing '${wakeReason}' → '${effectiveModel}' (base model: '${model}')`,
     });
   }
+
+  // ── onlineSearch — append :online suffix for web-search-enabled runs ────────
+  // When onlineSearch is true and the model has no existing variant suffix
+  // (:online, :nitro, :thinking, etc.) the suffix is appended so OpenRouter
+  // routes to a web-search-capable provider variant.
+  const onlineSearch = asBoolean(config.onlineSearch, false);
+  if (onlineSearch && !effectiveModel.includes(":")) {
+    effectiveModel = `${effectiveModel}:online`;
+  }
+
+  // ── agentId override — caller-supplied identity for Anthropic metadata ──────
+  // When config.agentId is provided it overrides agent.id as the identity sent
+  // to the orager daemon (JWT subject → metadata.user_id in Anthropic requests).
+  // Paperclip platform logging always uses agent.id regardless of this override.
+  const configAgentId =
+    typeof config.agentId === "string" && config.agentId.trim()
+      ? config.agentId.trim()
+      : null;
+  const effectiveAgentId = configAgentId ?? agent.id;
 
   // Support both maxTurns and maxTurnsPerRun (alias for compatibility)
   const maxTurns = Math.max(0, safeNumber(
@@ -1981,7 +2008,7 @@ export async function executeAgentLoop(
     // Required env vars — pass through so orager also validates (belt-and-suspenders
     // for the spawn path; adapter-level check above handles daemon path).
     if (requiredEnvVars.length > 0) obj.requiredEnvVars = requiredEnvVars;
-    obj.memoryKey = buildMemoryKey(agent.id, workspaceRepoUrl);
+    obj.memoryKey = buildMemoryKey(effectiveAgentId, workspaceRepoUrl);
 
     // Per-agent API key isolation
     const _agentApiKey = asString(config.agentApiKey, "");
@@ -2387,7 +2414,7 @@ export async function executeAgentLoop(
           ...(apiKeyPool.length > 1 ? { apiKeys: apiKeyPool } : {}),
           ...(requiredEnvVars.length > 0 ? { requiredEnvVars } : {}),
           ...(asString(config.agentApiKey, "").trim() ? { agentApiKey: asString(config.agentApiKey, "").trim() } : {}),
-          memoryKey: buildMemoryKey(agent.id, workspaceRepoUrl),
+          memoryKey: buildMemoryKey(effectiveAgentId, workspaceRepoUrl),
           ...(["embedding", "fts", "local"].includes(asString(config.memoryRetrieval, ""))
             ? {
                 memoryRetrieval: asString(config.memoryRetrieval, "") as "embedding" | "fts" | "local",
@@ -2404,7 +2431,7 @@ export async function executeAgentLoop(
       const daemonResult = await executeViaDaemon(
         daemonBaseUrl,
         signingKey,
-        agent.id,
+        effectiveAgentId,
         prompt,
         promptContent,
         daemonOpts,
@@ -2788,6 +2815,7 @@ export {
   DAEMON_CB_THRESHOLD,
   DAEMON_CB_RESET_MS,
   buildAdapterResult,
+  processRateLimitTracker,
   _lastAutoStartAttemptMs,
   AUTO_START_COOLDOWN_MS,
   COST_ANOMALY_COOLDOWN_RUNS,
