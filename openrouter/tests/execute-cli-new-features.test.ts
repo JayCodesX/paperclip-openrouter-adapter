@@ -2,7 +2,7 @@
  * Tests for features added in the most recent execute-cli.ts revision:
  *   - onMeta fires on daemon path (before daemon/spawn branch)
  *   - filesChanged propagated from daemon result
- *   - SESSION_NOT_FOUND_MARKER in daemon warn → clearSession: true
+ *   - session_lost structured warn in daemon stream → clearSession: true
  *   - cwd mismatch on session resume → fresh session + log warning
  *   - Daemon key age warning fires at most once per process
  *   - errorCode "no_result" on spawn exit without result event
@@ -16,7 +16,6 @@ import {
   _resetStateForTesting,
   _drainStructuredLogForTesting,
   executeAgentLoop,
-  SESSION_NOT_FOUND_MARKER,
   DAEMON_KEY_PATH,
   DAEMON_KEY_MAX_AGE_MS,
 } from "../src/server/execute-cli.js";
@@ -218,52 +217,9 @@ describe("filesChanged — daemon path", () => {
   });
 });
 
-// ── SESSION_NOT_FOUND_MARKER in daemon warn → clearSession ───────────────────
+// ── session_lost structured warn → clearSession ──────────────────────────────
 
 describe("session loss detection — daemon path", () => {
-  it("sets clearSession=true when daemon emits SESSION_NOT_FOUND_MARKER warn", async () => {
-    stubSigningKey(TEST_SIGNING_KEY);
-    const eventsWithSessionLost = [
-      { type: "warn", message: `Session ${SESSION_NOT_FOUND_MARKER}` },
-      { type: "system", session_id: "sess-new", model: "openai/gpt-4o" },
-      {
-        type: "result",
-        subtype: "success",
-        result: "Done",
-        session_id: "sess-new",
-        usage: { input_tokens: 5, output_tokens: 3, cache_read_input_tokens: 0 },
-        total_cost_usd: 0.0005,
-      },
-    ];
-    mockDaemon(eventsWithSessionLost);
-
-    const result = await executeAgentLoop({
-      ...baseArgs({
-        runtime: {
-          sessionId: "old-session-id",
-          sessionParams: {
-            oragerSessionId: "old-sess",
-            cwd: os.tmpdir(),
-            updatedAt: new Date().toISOString(),
-          },
-          sessionDisplayId: "old-sess",
-          taskKey: null,
-        },
-      }),
-      config: {
-        apiKey: "sk-test",
-        model: "openai/gpt-4o",
-        daemonUrl: "http://127.0.0.1:4000",
-        cwd: os.tmpdir(),
-        dangerouslySkipPermissions: true,
-      },
-      onLog: async () => {},
-      onMeta: async () => {},
-    } as Parameters<typeof executeAgentLoop>[0]);
-
-    expect(result.clearSession).toBe(true);
-  });
-
   it("sets clearSession=true when daemon emits structured warn subtype session_lost", async () => {
     stubSigningKey(TEST_SIGNING_KEY);
     const eventsWithStructuredSessionLost = [

@@ -5,7 +5,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   processOragerEvent,
-  SESSION_NOT_FOUND_MARKER,
 } from "../src/server/execute-cli.js";
 import type { OragerStreamState } from "../src/server/execute-cli.js";
 
@@ -96,17 +95,6 @@ describe("warn event — session_lost", () => {
     const onSessionLost = vi.fn();
     processOragerEvent(
       { type: "warn", subtype: "session_lost", message: "session x not found, starting fresh" },
-      state, noopLog, onSessionLost,
-    );
-    expect(state.sessionLost).toBe(true);
-    expect(onSessionLost).toHaveBeenCalledOnce();
-  });
-
-  it("sets sessionLost via SESSION_NOT_FOUND_MARKER string-match fallback", () => {
-    const state = makeState();
-    const onSessionLost = vi.fn();
-    processOragerEvent(
-      { type: "warn", message: `session abc ${SESSION_NOT_FOUND_MARKER}` },
       state, noopLog, onSessionLost,
     );
     expect(state.sessionLost).toBe(true);

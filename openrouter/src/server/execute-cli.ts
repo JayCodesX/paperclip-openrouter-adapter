@@ -207,12 +207,6 @@ function buildApiKeyPool(config: Record<string, unknown>): { primary: string; po
   return { primary, pool };
 }
 
-// Emitted by orager to stderr when a requested session isn't found on disk.
-// We detect this string to clear the stale session ID on the Paperclip side.
-// Exported so tests can assert on the exact marker without magic strings.
-// Source: ~/Projects/orager/src/loop.ts — search for "starting fresh"
-export const SESSION_NOT_FOUND_MARKER = "not found, starting fresh";
-
 // ── Shared NDJSON stream event processing ─────────────────────────────────────
 
 /** The parsed shape of a "question" event from the orager event stream. */
@@ -261,12 +255,7 @@ export function processOragerEvent(
   }
   if (event.type === "warn" && typeof event.message === "string") {
     void onLog("stderr", `[openrouter adapter] ${event.message}\n`);
-    // Primary: structured subtype (orager >= sprint2).
-    // Fallback: message string-match for older orager versions.
-    if (
-      event["subtype"] === "session_lost" ||
-      (event.message as string).includes(SESSION_NOT_FOUND_MARKER)
-    ) {
+    if (event["subtype"] === "session_lost") {
       if (!state.sessionLost) {
         state.sessionLost = true;
         onSessionLost();
@@ -2692,13 +2681,6 @@ export async function executeAgentLoop(
 
     proc.stderr?.on("data", (chunk: Buffer | string) => {
       const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-      // String-match fallback for orager versions that predate the structured
-      // session_lost event (sprint2). processOragerEvent covers the structured
-      // path; this catches the plain-text stderr line for older builds.
-      if (text.includes(SESSION_NOT_FOUND_MARKER) && !spawnStreamState.sessionLost) {
-        spawnStreamState.sessionLost = true;
-        structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId: agent.id, runId, sessionId: previousSessionId ?? undefined });
-      }
       void onLog("stderr", text);
     });
 
