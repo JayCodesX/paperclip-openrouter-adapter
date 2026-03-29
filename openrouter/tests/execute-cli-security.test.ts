@@ -284,6 +284,169 @@ describe("extraArgs blocklist — equals-sign form", () => {
   });
 });
 
+// ── extraArgs blocklist — M4 new entries ─────────────────────────────────────
+
+describe("extraArgs blocklist — M4 new blocked flags", () => {
+  // Tests for the 16 flags added in the M4 security expansion.
+  // Groups: config-override, daemon/process-mode, subcommands.
+
+  function makeCtx(extraArgs: string[]): Parameters<typeof executeAgentLoop>[0] {
+    return {
+      runId: "test-m4-blocklist",
+      agent: { id: "agent-1", name: "Test", companyId: "co-1" },
+      runtime: { sessionId: null, sessionParams: {} },
+      config: { apiKey: "sk-test", model: "openai/gpt-4o", extraArgs },
+      context: {},
+      onLog: async () => {},
+    };
+  }
+
+  // Config-override flags
+  it("rejects --settings-file in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--settings-file", "/etc/evil.json"]));
+    expect(result.errorCode).toBe("config_error");
+    expect(result.errorMessage).toContain("--settings-file");
+  });
+
+  it("rejects --settings-file=/etc/evil (equals-sign variant)", async () => {
+    const result = await executeAgentLoop(makeCtx(["--settings-file=/etc/evil.json"]));
+    expect(result.errorCode).toBe("config_error");
+  });
+
+  // Daemon / process-mode flags
+  it("rejects --max-concurrent in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--max-concurrent", "99"]));
+    expect(result.errorCode).toBe("config_error");
+    expect(result.errorMessage).toContain("--max-concurrent");
+  });
+
+  it("rejects --idle-timeout in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--idle-timeout", "1m"]));
+    expect(result.errorCode).toBe("config_error");
+    expect(result.errorMessage).toContain("--idle-timeout");
+  });
+
+  it("rejects --allowed-cwd in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--allowed-cwd", "/"]));
+    expect(result.errorCode).toBe("config_error");
+    expect(result.errorMessage).toContain("--allowed-cwd");
+  });
+
+  // Subcommand flags
+  it("rejects --status in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--status"]));
+    expect(result.errorCode).toBe("config_error");
+    expect(result.errorMessage).toContain("--status");
+  });
+
+  it("rejects --sessions in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--sessions"]));
+    expect(result.errorCode).toBe("config_error");
+  });
+
+  it("rejects --list-sessions in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--list-sessions"]));
+    expect(result.errorCode).toBe("config_error");
+  });
+
+  it("rejects --search-sessions in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--search-sessions", "foo"]));
+    expect(result.errorCode).toBe("config_error");
+  });
+
+  it("rejects --trash-session in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--trash-session", "abc123"]));
+    expect(result.errorCode).toBe("config_error");
+  });
+
+  it("rejects --restore-session in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--restore-session", "abc123"]));
+    expect(result.errorCode).toBe("config_error");
+  });
+
+  it("rejects --delete-session in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--delete-session", "abc123"]));
+    expect(result.errorCode).toBe("config_error");
+  });
+
+  it("rejects --delete-trashed in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--delete-trashed"]));
+    expect(result.errorCode).toBe("config_error");
+  });
+
+  it("rejects --rollback-session in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--rollback-session", "abc123"]));
+    expect(result.errorCode).toBe("config_error");
+  });
+
+  it("rejects --prune-sessions in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--prune-sessions"]));
+    expect(result.errorCode).toBe("config_error");
+  });
+
+  it("rejects --rotate-key in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--rotate-key"]));
+    expect(result.errorCode).toBe("config_error");
+  });
+
+  it("rejects --clear-model-cache in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--clear-model-cache"]));
+    expect(result.errorCode).toBe("config_error");
+  });
+
+  // Equals-sign forms for representative new flags
+  it("rejects --settings-file= (equals-sign) variant", async () => {
+    const result = await executeAgentLoop(makeCtx(["--settings-file=/tmp/evil"]));
+    expect(result.errorCode).toBe("config_error");
+  });
+
+  it("rejects --max-concurrent= (equals-sign) variant", async () => {
+    const result = await executeAgentLoop(makeCtx(["--max-concurrent=99"]));
+    expect(result.errorCode).toBe("config_error");
+  });
+
+  it("rejects --status= (equals-sign) variant", async () => {
+    const result = await executeAgentLoop(makeCtx(["--status=json"]));
+    expect(result.errorCode).toBe("config_error");
+  });
+
+  // Fix 2: newly-added critical flags (--resume, --model, --system-prompt-file, --output-format, --port)
+  it("rejects --resume in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--resume", "session-abc"]));
+    expect(result.errorCode).toBe("config_error");
+    expect(result.errorMessage).toContain("--resume");
+  });
+
+  it("rejects --resume=<id> (equals-sign variant)", async () => {
+    const result = await executeAgentLoop(makeCtx(["--resume=session-abc"]));
+    expect(result.errorCode).toBe("config_error");
+  });
+
+  it("rejects --model in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--model", "openai/gpt-4o"]));
+    expect(result.errorCode).toBe("config_error");
+    expect(result.errorMessage).toContain("--model");
+  });
+
+  it("rejects --system-prompt-file in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--system-prompt-file", "/etc/evil"]));
+    expect(result.errorCode).toBe("config_error");
+    expect(result.errorMessage).toContain("--system-prompt-file");
+  });
+
+  it("rejects --output-format in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--output-format", "json"]));
+    expect(result.errorCode).toBe("config_error");
+    expect(result.errorMessage).toContain("--output-format");
+  });
+
+  it("rejects --port in extraArgs", async () => {
+    const result = await executeAgentLoop(makeCtx(["--port", "4000"]));
+    expect(result.errorCode).toBe("config_error");
+    expect(result.errorMessage).toContain("--port");
+  });
+});
+
 describe("webhookUrl loopback SSRF guard", () => {
   // webhookUrl pointing at loopback addresses should be silently ignored (SSRF guard).
   // The run continues but the config object sent to orager omits webhookUrl.

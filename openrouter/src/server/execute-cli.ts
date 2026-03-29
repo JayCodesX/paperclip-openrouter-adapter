@@ -34,11 +34,15 @@ interface StructuredLogEntry {
   [key: string]: unknown;
 }
 
-// Test-only buffer — populated by _resetStateForTesting / drained by _drainStructuredLogForTesting.
+// In-memory log buffer — used by tests and for in-process diagnostics.
+// Capped at 10,000 entries (ring-buffer eviction) so long-lived Paperclip
+// worker processes do not accumulate unbounded memory across thousands of runs.
+const LOG_BUFFER_MAX = 10_000;
 const _structuredLogBuffer: StructuredLogEntry[] = [];
 
 function structuredLog(entry: StructuredLogEntry): void {
   _structuredLogBuffer.push(entry);
+  if (_structuredLogBuffer.length > LOG_BUFFER_MAX) _structuredLogBuffer.shift();
   if (!STRUCTURED_LOG_FILE) return;
   try {
     appendFileSync(STRUCTURED_LOG_FILE, JSON.stringify({ ...entry, ts: entry.ts }) + "\n");
@@ -1978,10 +1982,12 @@ export async function executeAgentLoop(
   if (agentApiKey.trim()) configObj.agentApiKey = agentApiKey.trim();
 
   const memoryRetrieval = asString(config.memoryRetrieval, "");
-  if (memoryRetrieval === "embedding") {
-    configObj.memoryRetrieval = "embedding";
-    const embModel = asString(config.memoryEmbeddingModel, "");
-    if (embModel) configObj.memoryEmbeddingModel = embModel;
+  if (memoryRetrieval === "embedding" || memoryRetrieval === "fts" || memoryRetrieval === "local") {
+    configObj.memoryRetrieval = memoryRetrieval;
+    if (memoryRetrieval === "embedding") {
+      const embModel = asString(config.memoryEmbeddingModel, "");
+      if (embModel) configObj.memoryEmbeddingModel = embModel;
+    }
   }
   const memoryMaxChars = asNumber(config.memoryMaxChars, 0);
   if (memoryMaxChars > 0) configObj.memoryMaxChars = memoryMaxChars;
@@ -2015,13 +2021,45 @@ export async function executeAgentLoop(
     };
   }
 
-  // Security: block dangerous flags that could bypass all tool approval gates.
-  // WARNING: this must stay in sync with the orager CLI flag names.
+  // Security: block dangerous flags that could bypass security controls, override
+  // adapter config, or change the process mode. Must stay in sync with orager CLI
+  // flag names. Categories:
+  //   • Security bypass:   --dangerously-skip-permissions
+  //   • Config override:   --config-file, --settings-file
+  //   • Session hijack:    --resume (could load another user's session history)
+  //   • Model override:    --model (could redirect conversation to attacker-controlled endpoint)
+  //   • Prompt injection:  --system-prompt-file (could inject arbitrary system prompt from disk)
+  //   • Output control:    --output-format (adapter controls output format)
+  //   • Daemon/proc mode:  --serve, --port, --max-concurrent, --idle-timeout, --allowed-cwd
+  //   • Subcommands:       --status, --sessions, --list-sessions, --search-sessions,
+  //                        --trash-session, --restore-session, --delete-session,
+  //                        --delete-trashed, --rollback-session, --prune-sessions,
+  //                        --rotate-key, --clear-model-cache
   const BLOCKED_EXTRA_ARGS = new Set([
     "--dangerously-skip-permissions",
+    "--config-file",
+    "--settings-file",
+    "--resume",
+    "--model",
+    "--system-prompt-file",
+    "--output-format",
     "--serve",
     "--port",
-    "--config-file",  // prevent overriding our config file with an attacker-supplied one
+    "--max-concurrent",
+    "--idle-timeout",
+    "--allowed-cwd",
+    "--status",
+    "--sessions",
+    "--list-sessions",
+    "--search-sessions",
+    "--trash-session",
+    "--restore-session",
+    "--delete-session",
+    "--delete-trashed",
+    "--rollback-session",
+    "--prune-sessions",
+    "--rotate-key",
+    "--clear-model-cache",
   ]);
   // Also catch "--flag=value" variants (e.g. "--config-file=/tmp/evil").
   const blockedFound = extraArgs.filter((a) =>
@@ -2335,10 +2373,12 @@ export async function executeAgentLoop(
         ...(requiredEnvVars.length > 0 ? { requiredEnvVars } : {}),
         ...(asString(config.agentApiKey, "").trim() ? { agentApiKey: asString(config.agentApiKey, "").trim() } : {}),
         memoryKey: buildMemoryKey(agent.id, workspaceRepoUrl),
-        ...(asString(config.memoryRetrieval, "") === "embedding"
+        ...(["embedding", "fts", "local"].includes(asString(config.memoryRetrieval, ""))
           ? {
-              memoryRetrieval: "embedding" as const,
-              ...(asString(config.memoryEmbeddingModel, "") ? { memoryEmbeddingModel: asString(config.memoryEmbeddingModel, "") } : {}),
+              memoryRetrieval: asString(config.memoryRetrieval, "") as "embedding" | "fts" | "local",
+              ...(asString(config.memoryRetrieval, "") === "embedding" && asString(config.memoryEmbeddingModel, "")
+                ? { memoryEmbeddingModel: asString(config.memoryEmbeddingModel, "") }
+                : {}),
             }
           : {}),
         ...(asNumber(config.memoryMaxChars, 0) > 0 ? { memoryMaxChars: asNumber(config.memoryMaxChars, 0) } : {}),

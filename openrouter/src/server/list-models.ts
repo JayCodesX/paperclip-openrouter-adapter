@@ -2,7 +2,7 @@ import { models as fallbackModels } from "../index.js";
 
 const OPENROUTER_MODELS_ENDPOINT = "https://openrouter.ai/api/v1/models";
 const TIMEOUT_MS = 5000;
-const CACHE_TTL_MS = 60_000;
+const CACHE_TTL_MS = 5 * 60_000; // 5 minutes — aligns with execute-cli.ts vision cache TTL
 
 export type AdapterModel = { id: string; label: string; supportsVision: boolean };
 

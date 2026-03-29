@@ -260,7 +260,7 @@ else
   exit 1
 fi
 
-# ── 3. Deploy pre-built UI ────────────────────────────────────────────────────
+# ── 4. Deploy pre-built UI ────────────────────────────────────────────────────
 # Replace the installed ui-dist with our pre-built bundle that has the
 # OpenRouter adapter wired into the adapter registry, model dropdown, and
 # config form.  This avoids fragile minified-bundle patching entirely.
@@ -279,7 +279,7 @@ else
   echo "  Done."
 fi
 
-# ── 5. Ensure PAPERCLIP_AGENT_JWT_SECRET is set ──────────────────────────────
+# ── 5. Ensure PAPERCLIP_AGENT_JWT_SECRET is set ─────────────────────────────
 # The JWT secret is required for adapters to receive PAPERCLIP_API_KEY so they
 # can call the Paperclip API. Without it, server-side task pre-fetching won't work.
 PAPERCLIP_INSTANCE_DIR="$HOME/.paperclip/instances/default"
