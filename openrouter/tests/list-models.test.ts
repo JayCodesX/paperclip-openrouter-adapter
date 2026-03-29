@@ -185,6 +185,30 @@ describe("listOpenRouterModels", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("cache expires after 5 minutes — re-fetches after TTL elapses", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: [{ id: "openai/gpt-4o", name: "GPT-4o", input_modalities: ["text", "image"] }] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.useFakeTimers();
+
+    await listOpenRouterModels();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Advance just under 5 minutes — should still be cached
+    vi.advanceTimersByTime(4 * 60 * 1000 + 59_000);
+    await listOpenRouterModels();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Advance past 5 minutes — cache should be expired
+    vi.advanceTimersByTime(2000);
+    await listOpenRouterModels();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    vi.useRealTimers();
+  });
+
   it("_resetModelCacheForTesting clears cache — next call re-fetches", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

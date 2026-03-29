@@ -1978,10 +1978,12 @@ export async function executeAgentLoop(
   if (agentApiKey.trim()) configObj.agentApiKey = agentApiKey.trim();
 
   const memoryRetrieval = asString(config.memoryRetrieval, "");
-  if (memoryRetrieval === "embedding") {
-    configObj.memoryRetrieval = "embedding";
-    const embModel = asString(config.memoryEmbeddingModel, "");
-    if (embModel) configObj.memoryEmbeddingModel = embModel;
+  if (memoryRetrieval === "embedding" || memoryRetrieval === "fts" || memoryRetrieval === "local") {
+    configObj.memoryRetrieval = memoryRetrieval;
+    if (memoryRetrieval === "embedding") {
+      const embModel = asString(config.memoryEmbeddingModel, "");
+      if (embModel) configObj.memoryEmbeddingModel = embModel;
+    }
   }
   const memoryMaxChars = asNumber(config.memoryMaxChars, 0);
   if (memoryMaxChars > 0) configObj.memoryMaxChars = memoryMaxChars;
@@ -2359,10 +2361,12 @@ export async function executeAgentLoop(
         ...(requiredEnvVars.length > 0 ? { requiredEnvVars } : {}),
         ...(asString(config.agentApiKey, "").trim() ? { agentApiKey: asString(config.agentApiKey, "").trim() } : {}),
         memoryKey: buildMemoryKey(agent.id, workspaceRepoUrl),
-        ...(asString(config.memoryRetrieval, "") === "embedding"
+        ...(["embedding", "fts", "local"].includes(asString(config.memoryRetrieval, ""))
           ? {
-              memoryRetrieval: "embedding" as const,
-              ...(asString(config.memoryEmbeddingModel, "") ? { memoryEmbeddingModel: asString(config.memoryEmbeddingModel, "") } : {}),
+              memoryRetrieval: asString(config.memoryRetrieval, "") as "embedding" | "fts" | "local",
+              ...(asString(config.memoryRetrieval, "") === "embedding" && asString(config.memoryEmbeddingModel, "")
+                ? { memoryEmbeddingModel: asString(config.memoryEmbeddingModel, "") }
+                : {}),
             }
           : {}),
         ...(asNumber(config.memoryMaxChars, 0) > 0 ? { memoryMaxChars: asNumber(config.memoryMaxChars, 0) } : {}),
