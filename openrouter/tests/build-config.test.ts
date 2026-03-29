@@ -527,3 +527,80 @@ describe("buildOpenRouterConfig — approvalMode", () => {
     expect(Object.prototype.hasOwnProperty.call(config, "approvalMode")).toBe(false);
   });
 });
+
+describe("buildOpenRouterConfig — planMode", () => {
+  it("planMode: true → config.planMode === true", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ planMode: true } as Parameters<typeof makeValues>[0]),
+    );
+    expect((config as Record<string, unknown>).planMode).toBe(true);
+  });
+
+  it("planMode: false → field absent", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ planMode: false } as Parameters<typeof makeValues>[0]),
+    );
+    expect(Object.prototype.hasOwnProperty.call(config, "planMode")).toBe(false);
+  });
+
+  it("planMode: missing → field absent", () => {
+    const config = buildOpenRouterConfig(makeValues());
+    expect(Object.prototype.hasOwnProperty.call(config, "planMode")).toBe(false);
+  });
+});
+
+describe("buildOpenRouterConfig — onlineSearch", () => {
+  it("onlineSearch: true → config.onlineSearch === true", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ onlineSearch: true } as Parameters<typeof makeValues>[0]),
+    );
+    expect((config as Record<string, unknown>).onlineSearch).toBe(true);
+  });
+
+  it("onlineSearch: false → field absent", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ onlineSearch: false } as Parameters<typeof makeValues>[0]),
+    );
+    expect(Object.prototype.hasOwnProperty.call(config, "onlineSearch")).toBe(false);
+  });
+
+  it("onlineSearch: missing → field absent", () => {
+    const config = buildOpenRouterConfig(makeValues());
+    expect(Object.prototype.hasOwnProperty.call(config, "onlineSearch")).toBe(false);
+  });
+});
+
+describe("buildOpenRouterConfig — agentId override", () => {
+  it("agentId: non-empty string → config.agentId set", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ agentId: "custom-agent-xyz" } as Parameters<typeof makeValues>[0]),
+    );
+    expect((config as Record<string, unknown>).agentId).toBe("custom-agent-xyz");
+  });
+
+  it("agentId: whitespace-only → field absent", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ agentId: "   " } as Parameters<typeof makeValues>[0]),
+    );
+    expect(Object.prototype.hasOwnProperty.call(config, "agentId")).toBe(false);
+  });
+
+  it("agentId: empty string → field absent", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ agentId: "" } as Parameters<typeof makeValues>[0]),
+    );
+    expect(Object.prototype.hasOwnProperty.call(config, "agentId")).toBe(false);
+  });
+
+  it("agentId: missing → field absent", () => {
+    const config = buildOpenRouterConfig(makeValues());
+    expect(Object.prototype.hasOwnProperty.call(config, "agentId")).toBe(false);
+  });
+
+  it("agentId: trims surrounding whitespace", () => {
+    const config = buildOpenRouterConfig(
+      makeValues({ agentId: "  my-agent  " } as Parameters<typeof makeValues>[0]),
+    );
+    expect((config as Record<string, unknown>).agentId).toBe("my-agent");
+  });
+});
