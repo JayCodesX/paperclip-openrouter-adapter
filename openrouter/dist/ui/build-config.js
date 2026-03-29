@@ -206,6 +206,102 @@ export function buildOpenRouterConfig(v) {
     if (typeof vc.toolErrorBudgetHardStop === "boolean" && vc.toolErrorBudgetHardStop) {
         ac.toolErrorBudgetHardStop = true;
     }
+    // ── Profile ───────────────────────────────────────────────────────────────
+    if (typeof vc.profile === "string" && vc.profile.trim()) {
+        ac.profile = vc.profile.trim();
+    }
+    // ── Webhook ───────────────────────────────────────────────────────────────
+    if (typeof vc.webhookUrl === "string" && vc.webhookUrl.trim()) {
+        ac.webhookUrl = vc.webhookUrl.trim();
+    }
+    // ── Extended summarization ────────────────────────────────────────────────
+    if (typeof vc.summarizePrompt === "string" && vc.summarizePrompt.trim()) {
+        ac.summarizePrompt = vc.summarizePrompt.trim();
+    }
+    if (typeof vc.summarizeFallbackKeep === "number" && vc.summarizeFallbackKeep >= 0) {
+        ac.summarizeFallbackKeep = vc.summarizeFallbackKeep;
+    }
+    // ── Hook / approval timing ────────────────────────────────────────────────
+    if (typeof vc.hookTimeoutMs === "number" && Number.isFinite(vc.hookTimeoutMs) && vc.hookTimeoutMs > 0) {
+        ac.hookTimeoutMs = vc.hookTimeoutMs;
+    }
+    if (typeof vc.approvalTimeoutMs === "number" && Number.isFinite(vc.approvalTimeoutMs) && vc.approvalTimeoutMs > 0) {
+        ac.approvalTimeoutMs = vc.approvalTimeoutMs;
+    }
+    // ── Advanced model routing ────────────────────────────────────────────────
+    if (typeof vc.preset === "string" && vc.preset.trim()) {
+        ac.preset = vc.preset.trim();
+    }
+    if (Array.isArray(vc.transforms) && vc.transforms.length > 0) {
+        ac.transforms = vc.transforms;
+    }
+    // ── Tool control ─────────────────────────────────────────────────────────
+    if (typeof vc.parallel_tool_calls === "boolean") {
+        ac.parallel_tool_calls = vc.parallel_tool_calls;
+    }
+    if (typeof vc.tool_choice === "string" && vc.tool_choice.trim()) {
+        ac.tool_choice = vc.tool_choice.trim();
+    }
+    // ── OTEL / observability passthrough ─────────────────────────────────────
+    if (typeof vc.otelEndpoint === "string" && vc.otelEndpoint.trim()) {
+        ac.otelEndpoint = vc.otelEndpoint.trim();
+    }
+    if (typeof vc.otelServiceName === "string" && vc.otelServiceName.trim()) {
+        ac.otelServiceName = vc.otelServiceName.trim();
+    }
+    if (typeof vc.otelResourceAttributes === "string" && vc.otelResourceAttributes.trim()) {
+        ac.otelResourceAttributes = vc.otelResourceAttributes.trim();
+    }
+    // ── Extra tool spec files ─────────────────────────────────────────────────
+    if (Array.isArray(vc.toolsFiles) && vc.toolsFiles.length > 0) {
+        ac.toolsFiles = vc.toolsFiles.filter((f) => typeof f === "string" && f.trim());
+    }
+    // ── Retry control ─────────────────────────────────────────────────────────
+    if (typeof vc.maxRetries === "number" && Number.isFinite(vc.maxRetries) && vc.maxRetries >= 0) {
+        ac.maxRetries = vc.maxRetries;
+    }
+    // ── Extra skill / tool directories ────────────────────────────────────────
+    // addDirs is an array of absolute filesystem paths. The adapter automatically
+    // includes the bundled Paperclip skills directory; entries here are added on top.
+    if (Array.isArray(vc.addDirs) && vc.addDirs.length > 0) {
+        ac.addDirs = vc.addDirs.filter((d) => typeof d === "string" && d.trim());
+    }
+    // ── Loop / timing ─────────────────────────────────────────────────────────
+    // Override the hardcoded defaults above when caller provides explicit values.
+    if (typeof vc.maxTurns === "number" && Number.isFinite(vc.maxTurns) && vc.maxTurns > 0) {
+        ac.maxTurns = vc.maxTurns;
+    }
+    if (typeof vc.timeoutSec === "number" && Number.isFinite(vc.timeoutSec) && vc.timeoutSec >= 0) {
+        ac.timeoutSec = vc.timeoutSec;
+    }
+    if (typeof vc.graceSec === "number" && Number.isFinite(vc.graceSec) && vc.graceSec >= 0) {
+        ac.graceSec = vc.graceSec;
+    }
+    // ── Per-agent API key isolation ───────────────────────────────────────────
+    if (typeof vc.agentApiKey === "string" && vc.agentApiKey.trim()) {
+        ac.agentApiKey = vc.agentApiKey.trim();
+    }
+    // ── Memory retrieval ──────────────────────────────────────────────────────
+    if (vc.memoryRetrieval === "embedding") {
+        ac.memoryRetrieval = "embedding";
+        if (typeof vc.memoryEmbeddingModel === "string" && vc.memoryEmbeddingModel.trim()) {
+            ac.memoryEmbeddingModel = vc.memoryEmbeddingModel.trim();
+        }
+    }
+    if (typeof vc.memoryMaxChars === "number" && vc.memoryMaxChars > 0)
+        ac.memoryMaxChars = vc.memoryMaxChars;
+    // ── Agent loop ─────────────────────────────────────────────────────────────
+    if (typeof vc.maxIdenticalToolCallTurns === "number" && vc.maxIdenticalToolCallTurns > 0)
+        ac.maxIdenticalToolCallTurns = vc.maxIdenticalToolCallTurns;
+    // ── Approval mode ──────────────────────────────────────────────────────────
+    if (vc.approvalMode === "question" || vc.approvalMode === "auto")
+        ac.approvalMode = vc.approvalMode;
+    // ── Spawn depth ────────────────────────────────────────────────────────────
+    if (typeof vc.maxSpawnDepth === "number" && vc.maxSpawnDepth >= 0)
+        ac.maxSpawnDepth = vc.maxSpawnDepth;
+    // ── Project instructions ──────────────────────────────────────────────────
+    if (typeof vc.readProjectInstructions === "boolean")
+        ac.readProjectInstructions = vc.readProjectInstructions;
     return ac;
 }
 //# sourceMappingURL=build-config.js.map
