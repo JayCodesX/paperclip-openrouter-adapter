@@ -7,6 +7,7 @@ import {
   _resetStateForTesting,
   buildApiKeyPool,
   checkVisionSupport,
+  VISION_CACHE_TTL_MS,
   recordRunCost,
   checkCostAnomaly,
   DEFAULT_MODEL,
@@ -944,5 +945,89 @@ describe("daemon circuit breaker half-open state", () => {
     expect(isDaemonCircuitOpen(url)).toBe(true);
     recordDaemonSuccess(url);
     expect(isDaemonCircuitOpen(url)).toBe(false);
+  });
+});
+
+// ── checkVisionSupport — TTL expiry ──────────────────────────────────────────
+// Verifies the 6-hour cache expires correctly:
+// - After TTL ms elapse, the next call must fetch again (cache miss).
+// - Before TTL elapses, the cached result is returned without a second fetch.
+// - The refreshed result reflects the new fetch response (not the stale value).
+
+describe("checkVisionSupport — TTL expiry", () => {
+  beforeEach(() => {
+    _resetStateForTesting();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("re-fetches after VISION_CACHE_TTL_MS elapses — fetch called twice", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [{ id: "ttl/model-a", architecture: { input_modalities: ["text", "image"] } }],
+      }),
+    } as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    // First call populates the cache.
+    await checkVisionSupport("sk-test", "ttl/model-a");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Advance time just past the TTL window — cache is now stale.
+    vi.advanceTimersByTime(VISION_CACHE_TTL_MS + 1);
+
+    // Second call must bypass the cache and issue a fresh fetch.
+    await checkVisionSupport("sk-test", "ttl/model-a");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does NOT re-fetch while still inside the TTL window", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [{ id: "ttl/model-b", architecture: { input_modalities: ["text"] } }],
+      }),
+    } as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await checkVisionSupport("sk-test", "ttl/model-b");
+
+    // Advance to 1 ms before the TTL — still within the window.
+    vi.advanceTimersByTime(VISION_CACHE_TTL_MS - 1);
+
+    await checkVisionSupport("sk-test", "ttl/model-b");
+    expect(fetchMock).toHaveBeenCalledTimes(1); // still served from cache
+  });
+
+  it("result returned after TTL expiry reflects the fresh fetch response", async () => {
+    // First fetch: model has no vision support.
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: [{ id: "ttl/model-c", architecture: { input_modalities: ["text"] } }],
+        }),
+      } as Response)
+      // Second fetch: model now has vision support (simulating a data update).
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: [{ id: "ttl/model-c", architecture: { input_modalities: ["text", "image"] } }],
+        }),
+      } as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = await checkVisionSupport("sk-test", "ttl/model-c");
+    expect(first).toBe(false); // text-only from first fetch
+
+    vi.advanceTimersByTime(VISION_CACHE_TTL_MS + 1);
+
+    const second = await checkVisionSupport("sk-test", "ttl/model-c");
+    expect(second).toBe(true); // image support from refreshed fetch
   });
 });
