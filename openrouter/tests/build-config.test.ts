@@ -919,3 +919,128 @@ describe("buildOpenRouterConfig — provider routing block", () => {
     expect(Object.prototype.hasOwnProperty.call(cfg, "provider")).toBe(false);
   });
 });
+
+// ── sampling parameters ───────────────────────────────────────────────────────
+// Source: build-config.ts lines 38–65
+// Guards: Number.isFinite for floats, Number.isInteger for seed, Array for stop.
+
+describe("buildOpenRouterConfig — sampling parameters", () => {
+  type Cfg = Record<string, unknown>;
+
+  function cfg(overrides: Parameters<typeof makeValues>[0]): Cfg {
+    return buildOpenRouterConfig(makeValues(overrides)) as Cfg;
+  }
+
+  // ── temperature ─────────────────────────────────────────────────────────────
+  it("temperature: finite number → config.temperature set", () => {
+    expect(cfg({ temperature: 0.7 } as Parameters<typeof makeValues>[0]).temperature).toBe(0.7);
+  });
+
+  it("temperature: 0 is a valid finite number → config.temperature is 0", () => {
+    expect(cfg({ temperature: 0 } as Parameters<typeof makeValues>[0]).temperature).toBe(0);
+  });
+
+  it("temperature: NaN → field absent (isFinite guard)", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ temperature: NaN } as Parameters<typeof makeValues>[0]), "temperature")).toBe(false);
+  });
+
+  it("temperature: Infinity → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ temperature: Infinity } as Parameters<typeof makeValues>[0]), "temperature")).toBe(false);
+  });
+
+  it("temperature: absent → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({}), "temperature")).toBe(false);
+  });
+
+  // ── top_p ───────────────────────────────────────────────────────────────────
+  it("top_p: finite number → config.top_p set", () => {
+    expect(cfg({ top_p: 0.9 } as Parameters<typeof makeValues>[0]).top_p).toBe(0.9);
+  });
+
+  it("top_p: NaN → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ top_p: NaN } as Parameters<typeof makeValues>[0]), "top_p")).toBe(false);
+  });
+
+  // ── top_k ───────────────────────────────────────────────────────────────────
+  it("top_k: finite integer → config.top_k set", () => {
+    expect(cfg({ top_k: 50 } as Parameters<typeof makeValues>[0]).top_k).toBe(50);
+  });
+
+  it("top_k: NaN → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ top_k: NaN } as Parameters<typeof makeValues>[0]), "top_k")).toBe(false);
+  });
+
+  // ── frequency_penalty ───────────────────────────────────────────────────────
+  it("frequency_penalty: finite number → config.frequency_penalty set", () => {
+    expect(cfg({ frequency_penalty: 0.5 } as Parameters<typeof makeValues>[0]).frequency_penalty).toBe(0.5);
+  });
+
+  it("frequency_penalty: NaN → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ frequency_penalty: NaN } as Parameters<typeof makeValues>[0]), "frequency_penalty")).toBe(false);
+  });
+
+  // ── presence_penalty ────────────────────────────────────────────────────────
+  it("presence_penalty: finite number → config.presence_penalty set", () => {
+    expect(cfg({ presence_penalty: -0.3 } as Parameters<typeof makeValues>[0]).presence_penalty).toBe(-0.3);
+  });
+
+  it("presence_penalty: NaN → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ presence_penalty: NaN } as Parameters<typeof makeValues>[0]), "presence_penalty")).toBe(false);
+  });
+
+  // ── repetition_penalty ──────────────────────────────────────────────────────
+  it("repetition_penalty: finite number → config.repetition_penalty set", () => {
+    expect(cfg({ repetition_penalty: 1.1 } as Parameters<typeof makeValues>[0]).repetition_penalty).toBe(1.1);
+  });
+
+  it("repetition_penalty: Infinity → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ repetition_penalty: Infinity } as Parameters<typeof makeValues>[0]), "repetition_penalty")).toBe(false);
+  });
+
+  // ── min_p ───────────────────────────────────────────────────────────────────
+  it("min_p: finite number → config.min_p set", () => {
+    expect(cfg({ min_p: 0.05 } as Parameters<typeof makeValues>[0]).min_p).toBe(0.05);
+  });
+
+  it("min_p: NaN → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ min_p: NaN } as Parameters<typeof makeValues>[0]), "min_p")).toBe(false);
+  });
+
+  // ── seed ────────────────────────────────────────────────────────────────────
+  it("seed: integer → config.seed set", () => {
+    expect(cfg({ seed: 42 } as Parameters<typeof makeValues>[0]).seed).toBe(42);
+  });
+
+  it("seed: 0 → config.seed is 0 (valid integer)", () => {
+    expect(cfg({ seed: 0 } as Parameters<typeof makeValues>[0]).seed).toBe(0);
+  });
+
+  it("seed: float (non-integer) → field absent (isInteger guard)", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ seed: 1.5 } as Parameters<typeof makeValues>[0]), "seed")).toBe(false);
+  });
+
+  it("seed: NaN → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ seed: NaN } as Parameters<typeof makeValues>[0]), "seed")).toBe(false);
+  });
+
+  // ── stop ────────────────────────────────────────────────────────────────────
+  it("stop: non-empty array → config.stop set", () => {
+    expect(cfg({ stop: ["<|end|>", "\\n\\n"] } as Parameters<typeof makeValues>[0]).stop).toEqual(["<|end|>", "\\n\\n"]);
+  });
+
+  it("stop: empty array → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({ stop: [] } as Parameters<typeof makeValues>[0]), "stop")).toBe(false);
+  });
+
+  it("stop: absent → field absent", () => {
+    expect(Object.prototype.hasOwnProperty.call(cfg({}), "stop")).toBe(false);
+  });
+
+  // ── all absent → all absent ──────────────────────────────────────────────────
+  it("no sampling fields set → all nine fields absent from config", () => {
+    const c = cfg({});
+    for (const key of ["temperature", "top_p", "top_k", "frequency_penalty", "presence_penalty", "repetition_penalty", "min_p", "seed", "stop"]) {
+      expect(Object.prototype.hasOwnProperty.call(c, key), `${key} should be absent`).toBe(false);
+    }
+  });
+});
