@@ -305,6 +305,90 @@ describe("runId in daemon structured logs", () => {
   });
 });
 
+// ── webhookFormat forwarded to daemon and spawn paths ────────────────────────
+
+describe("webhookFormat forwarding — daemon path", () => {
+  it("passes webhookFormat=discord in the daemon /run request body when webhookUrl is set", async () => {
+    stubSigningKey(TEST_SIGNING_KEY);
+    const capturedBodies: unknown[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+        if (String(url).endsWith("/health")) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: "ok" }) });
+        }
+        capturedBodies.push(JSON.parse((init?.body as string) ?? "{}"));
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          body: ndjsonStream(SUCCESS_EVENTS),
+          headers: new Headers(),
+        });
+      }),
+    );
+
+    await executeAgentLoop({
+      ...baseArgs(),
+      config: {
+        apiKey: "sk-test",
+        model: "openai/gpt-4o",
+        daemonUrl: "http://127.0.0.1:4000",
+        cwd: os.tmpdir(),
+        dangerouslySkipPermissions: true,
+        webhookUrl: "https://hooks.example.com/notify",
+        webhookFormat: "discord",
+      },
+      onLog: async () => {},
+      onMeta: async () => {},
+    } as Parameters<typeof executeAgentLoop>[0]);
+
+    expect(capturedBodies).toHaveLength(1);
+    const opts = (capturedBodies[0] as { opts: Record<string, unknown> }).opts;
+    expect(opts.webhookUrl).toBe("https://hooks.example.com/notify");
+    expect(opts.webhookFormat).toBe("discord");
+  });
+
+  it("does not set webhookFormat when webhookUrl is absent", async () => {
+    stubSigningKey(TEST_SIGNING_KEY);
+    const capturedBodies: unknown[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+        if (String(url).endsWith("/health")) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: "ok" }) });
+        }
+        capturedBodies.push(JSON.parse((init?.body as string) ?? "{}"));
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          body: ndjsonStream(SUCCESS_EVENTS),
+          headers: new Headers(),
+        });
+      }),
+    );
+
+    await executeAgentLoop({
+      ...baseArgs(),
+      config: {
+        apiKey: "sk-test",
+        model: "openai/gpt-4o",
+        daemonUrl: "http://127.0.0.1:4000",
+        cwd: os.tmpdir(),
+        dangerouslySkipPermissions: true,
+        webhookFormat: "discord", // set without a webhookUrl
+      },
+      onLog: async () => {},
+      onMeta: async () => {},
+    } as Parameters<typeof executeAgentLoop>[0]);
+
+    expect(capturedBodies).toHaveLength(1);
+    const opts = (capturedBodies[0] as { opts: Record<string, unknown> }).opts;
+    expect(opts.webhookFormat).toBeUndefined();
+  });
+});
+
 // ── cwd mismatch → log warning and use fresh session ────────────────────────
 
 describe("cwd mismatch on session resume", () => {
