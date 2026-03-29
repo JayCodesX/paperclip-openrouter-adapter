@@ -264,6 +264,47 @@ describe("session loss detection — daemon path", () => {
   });
 });
 
+// ── runId threaded through daemon structured logs ─────────────────────────────
+
+describe("runId in daemon structured logs", () => {
+  it("structured logs emitted inside executeViaDaemon carry the caller's runId", async () => {
+    stubSigningKey(TEST_SIGNING_KEY);
+    // Emit a session_lost warn so the session_not_found structuredLog fires
+    // inside executeViaDaemon — this is the event that previously logged runId: "".
+    const events = [
+      { type: "warn", subtype: "session_lost", message: "session stale not found, starting fresh", session_id: "stale" },
+      { type: "system", session_id: "sess-new", model: "openai/gpt-4o" },
+      {
+        type: "result",
+        subtype: "success",
+        result: "Done",
+        session_id: "sess-new",
+        usage: { input_tokens: 5, output_tokens: 3, cache_read_input_tokens: 0 },
+        total_cost_usd: 0.0005,
+      },
+    ];
+    mockDaemon(events);
+
+    await executeAgentLoop({
+      ...baseArgs({ runId: "my-specific-run-id" }),
+      config: {
+        apiKey: "sk-test",
+        model: "openai/gpt-4o",
+        daemonUrl: "http://127.0.0.1:4000",
+        cwd: os.tmpdir(),
+        dangerouslySkipPermissions: true,
+      },
+      onLog: async () => {},
+      onMeta: async () => {},
+    } as Parameters<typeof executeAgentLoop>[0]);
+
+    const logs = _drainStructuredLogForTesting();
+    const sessionNotFoundLog = logs.find((e) => e.event === "session_not_found");
+    expect(sessionNotFoundLog).toBeDefined();
+    expect(sessionNotFoundLog?.runId).toBe("my-specific-run-id");
+  });
+});
+
 // ── cwd mismatch → log warning and use fresh session ────────────────────────
 
 describe("cwd mismatch on session resume", () => {
