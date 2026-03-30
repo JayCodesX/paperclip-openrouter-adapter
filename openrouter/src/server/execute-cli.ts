@@ -2603,7 +2603,15 @@ export async function executeAgentLoop(
       return;
     }
 
-    // Write prompt to stdin
+    // Write prompt to stdin.
+    // Attach an error handler before writing — on Linux, EPIPE from a process
+    // that closes stdin early surfaces as an async 'error' event on the stream,
+    // not a thrown exception. Without this listener it becomes an unhandled error.
+    proc.stdin?.on("error", (stdinErr: NodeJS.ErrnoException) => {
+      if (stdinErr.code !== "EPIPE") {
+        void onLog("stderr", `[openrouter adapter] WARNING: stdin error (${stdinErr.message}) — orager may not have received the prompt\n`);
+      }
+    });
     try {
       proc.stdin?.write(prompt, "utf8");
       proc.stdin?.end();
