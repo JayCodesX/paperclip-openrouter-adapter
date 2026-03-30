@@ -21,7 +21,11 @@ const TEST_SIGNING_KEY = "integration-test-key-32-bytes!!!";
 const KEY_PATH = path.join(os.homedir(), ".orager", "daemon.key");
 const DAEMON_KEY_DIR = path.join(os.homedir(), ".orager");
 
-/** Timeout for tests that involve async retry paths (ms). */
+/**
+ * Timeout for tests that involve async retry paths (ms).
+ * 15 s is enough: 503-retry tests use Retry-After: 0 so the only real cost is
+ * HTTP round-trips to the local test server; we give generous headroom for CI.
+ */
 const RETRY_IT = 15_000;
 
 // ── Server state ──────────────────────────────────────────────────────────────
@@ -287,12 +291,53 @@ describe("adapter daemon flow — happy path", () => {
     expect(opts.model).toBe("gpt-4o");
   });
 
-  it("forwards dangerouslySkipPermissions to daemon opts", async () => {
+  it("does not forward dangerouslySkipPermissions to daemon opts (spawn-path-only)", async () => {
     await executeAgentLoop(makeCtx({ dangerouslySkipPermissions: true }));
 
     expect(lastRunRequest).not.toBeNull();
     const opts = lastRunRequest!.body.opts as Record<string, unknown>;
-    expect(opts.dangerouslySkipPermissions).toBe(true);
+    // dangerouslySkipPermissions is stripped at the daemon unconditionally and
+    // is intentionally absent from DaemonRunOpts — it must not reach the wire.
+    expect(opts.dangerouslySkipPermissions).toBeUndefined();
+  });
+
+  it("forwards memoryRetrieval: fts to daemon opts", async () => {
+    await executeAgentLoop(makeCtx({ memoryRetrieval: "fts" }));
+
+    expect(lastRunRequest).not.toBeNull();
+    const opts = lastRunRequest!.body.opts as Record<string, unknown>;
+    expect(opts.memoryRetrieval).toBe("fts");
+  });
+
+  it("forwards memoryRetrieval: embedding + memoryEmbeddingModel to daemon opts", async () => {
+    await executeAgentLoop(
+      makeCtx({ memoryRetrieval: "embedding", memoryEmbeddingModel: "text-embedding-3-small" }),
+    );
+
+    expect(lastRunRequest).not.toBeNull();
+    const opts = lastRunRequest!.body.opts as Record<string, unknown>;
+    expect(opts.memoryRetrieval).toBe("embedding");
+    expect(opts.memoryEmbeddingModel).toBe("text-embedding-3-small");
+  });
+
+  it("forwards memoryRetrievalThreshold: 0.75 to daemon opts", async () => {
+    await executeAgentLoop(makeCtx({ memoryRetrievalThreshold: 0.75 }));
+
+    expect(lastRunRequest).not.toBeNull();
+    const opts = lastRunRequest!.body.opts as Record<string, unknown>;
+    expect(opts.memoryRetrievalThreshold).toBe(0.75);
+  });
+
+  it("does not forward memoryRetrieval: local when memoryEmbeddingModel is set (embedding-only field)", async () => {
+    await executeAgentLoop(
+      makeCtx({ memoryRetrieval: "local", memoryEmbeddingModel: "text-embedding-3-small" }),
+    );
+
+    expect(lastRunRequest).not.toBeNull();
+    const opts = lastRunRequest!.body.opts as Record<string, unknown>;
+    expect(opts.memoryRetrieval).toBe("local");
+    // memoryEmbeddingModel is only forwarded when memoryRetrieval === "embedding"
+    expect(opts.memoryEmbeddingModel).toBeUndefined();
   });
 });
 

@@ -686,11 +686,9 @@ interface DaemonRunOpts {
   enableBrowserTools?: boolean;
   tagToolOutputs?: boolean;
   trackFileChanges?: boolean;
-  // ── Security (daemon strips these) ──────────────────────────────────────
-  dangerouslySkipPermissions?: boolean;
-  sandboxRoot?: string;
-  bashPolicy?: Record<string, unknown>;
-  requireApproval?: "all" | string[] | boolean | Record<string, unknown>;
+  // Note: dangerouslySkipPermissions, sandboxRoot, bashPolicy, requireApproval
+  // are intentionally absent — the daemon strips them unconditionally (security
+  // boundary). They are spawn-path-only opts.
   // ── Summarization ───────────────────────────────────────────────────────
   summarizeAt?: number;
   summarizeModel?: string;
@@ -726,8 +724,9 @@ interface DaemonRunOpts {
   agentApiKey?: string;
   // ── Memory ──────────────────────────────────────────────────────────────
   memoryKey?: string;
-  memoryRetrieval?: string;
+  memoryRetrieval?: "local" | "fts" | "embedding";
   memoryEmbeddingModel?: string;
+  memoryRetrievalThreshold?: number;
   memoryMaxChars?: number;
 }
 
@@ -2389,7 +2388,6 @@ export async function executeAgentLoop(
           maxTurns: maxTurns > 0 ? maxTurns : 0,
           maxRetries,
           cwd,
-          dangerouslySkipPermissions,
           forceResume: forceResume || undefined,
           verbose: false,
           useFinishTool,
@@ -2397,7 +2395,6 @@ export async function executeAgentLoop(
           settingsFile: settingsFile || undefined,
           siteUrl: siteUrl || undefined,
           siteName: siteName || undefined,
-          sandboxRoot: sandboxRoot || undefined,
           parallel_tool_calls: parallelToolCalls,
           tool_choice: toolChoice || undefined,
           temperature,
@@ -2434,14 +2431,12 @@ export async function executeAgentLoop(
           maxCostUsdSoft,
           costPerInputToken,
           costPerOutputToken,
-          requireApproval: effectiveRequireApproval,
           summarizeAt,
           summarizeModel: summarizeModel || undefined,
           summarizeKeepRecentTurns,
           tagToolOutputs,
           planMode: planMode || undefined,
           injectContext: injectContext || undefined,
-          bashPolicy: Object.keys(bashPolicy).length > 0 ? bashPolicy : undefined,
           trackFileChanges: trackFileChanges || undefined,
           enableBrowserTools: enableBrowserTools || undefined,
           readProjectInstructions,
@@ -2481,6 +2476,7 @@ export async function executeAgentLoop(
               }
             : {}),
           ...(asNumber(config.memoryMaxChars, 0) > 0 ? { memoryMaxChars: asNumber(config.memoryMaxChars, 0) } : {}),
+          ...(asNumber(config.memoryRetrievalThreshold, -1) >= 0 ? { memoryRetrievalThreshold: asNumber(config.memoryRetrievalThreshold, 0) } : {}),
         };
       };
       const daemonOpts = await buildDaemonRunOpts();
