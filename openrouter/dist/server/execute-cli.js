@@ -167,11 +167,6 @@ function buildApiKeyPool(config) {
     const pool = primary && !extra.includes(primary) ? [primary, ...extra] : extra.length > 0 ? extra : [primary];
     return { primary, pool };
 }
-// Emitted by orager to stderr when a requested session isn't found on disk.
-// We detect this string to clear the stale session ID on the Paperclip side.
-// Exported so tests can assert on the exact marker without magic strings.
-// Source: ~/Projects/orager/src/loop.ts — search for "starting fresh"
-export const SESSION_NOT_FOUND_MARKER = "not found, starting fresh";
 /**
  * Process a single parsed orager NDJSON event and update `state` in place.
  *
@@ -195,10 +190,7 @@ export function processOragerEvent(event, state, onLog, onSessionLost) {
     }
     if (event.type === "warn" && typeof event.message === "string") {
         void onLog("stderr", `[openrouter adapter] ${event.message}\n`);
-        // Primary: structured subtype (orager >= sprint2).
-        // Fallback: message string-match for older orager versions.
-        if (event["subtype"] === "session_lost" ||
-            event.message.includes(SESSION_NOT_FOUND_MARKER)) {
+        if (event["subtype"] === "session_lost") {
             if (!state.sessionLost) {
                 state.sessionLost = true;
                 onSessionLost();
@@ -518,7 +510,7 @@ function checkRequiredEnvVars(required, env) {
  * Execute an agent run by POSTing to the orager daemon.
  * Returns the same AdapterExecutionResult shape as the spawn path.
  */
-async function executeViaDaemon(baseUrl, signingKey, agentId, prompt, promptContent, daemonOpts, timeoutSec, onLog, maxCostUsdSoft) {
+async function executeViaDaemon(baseUrl, signingKey, agentId, runId, prompt, promptContent, daemonOpts, timeoutSec, onLog, maxCostUsdSoft) {
     const token = mintDaemonJwt(signingKey, agentId);
     const tokenMintedAt = Date.now();
     /** Re-mint if more than 12 minutes have passed (leaves 3-min buffer before 15-min expiry). */
@@ -560,7 +552,7 @@ async function executeViaDaemon(baseUrl, signingKey, agentId, prompt, promptCont
         // as a silent spawn fallback.
         const maxWaitMs = timeoutSec > 0 ? Math.max(Math.floor((timeoutSec * 1000) / 2), 1000) : 30_000;
         const waitMs = Math.min(retryAfterSec * 1000, maxWaitMs);
-        structuredLog({ level: "warn", ts: Date.now(), event: "daemon_retry", agentId, runId: "", message: `Daemon at capacity, retrying in ${Math.round(waitMs / 1000)}s` });
+        structuredLog({ level: "warn", ts: Date.now(), event: "daemon_retry", agentId, runId, message: `Daemon at capacity, retrying in ${Math.round(waitMs / 1000)}s` });
         void onLog("stderr", `[openrouter adapter] daemon at capacity — retrying in ${Math.round(waitMs / 1000)}s\n`);
         await new Promise((r) => setTimeout(r, waitMs));
         // Retry with a fresh token (original may expire if wait was long)
@@ -609,7 +601,7 @@ async function executeViaDaemon(baseUrl, signingKey, agentId, prompt, promptCont
         const waitMs = Math.min(retryAfterSec * 1000, maxWaitMs);
         processRateLimitTracker.recordRateLimit(waitMs);
         processRateLimitTracker.updateFromHeaders(response.headers);
-        structuredLog({ level: "warn", ts: Date.now(), event: "daemon_rate_limited", agentId, runId: "", waitMs, message: `Daemon rate-limited (429), retrying in ${Math.round(waitMs / 1000)}s` });
+        structuredLog({ level: "warn", ts: Date.now(), event: "daemon_rate_limited", agentId, runId, waitMs, message: `Daemon rate-limited (429), retrying in ${Math.round(waitMs / 1000)}s` });
         void onLog("stderr", `[openrouter adapter] daemon rate-limited — retrying in ${Math.round(waitMs / 1000)}s\n`);
         await new Promise((r) => setTimeout(r, waitMs));
         const retryToken = mintDaemonJwt(signingKey, agentId);
@@ -724,7 +716,7 @@ async function executeViaDaemon(baseUrl, signingKey, agentId, prompt, promptCont
                 try {
                     const event = JSON.parse(line);
                     processOragerEvent(event, streamState, onLog, () => {
-                        structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId, runId: "", message: "Daemon session not found — started fresh" });
+                        structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId, runId, message: "Daemon session not found — started fresh" });
                     });
                 }
                 catch {
@@ -751,7 +743,7 @@ async function executeViaDaemon(baseUrl, signingKey, agentId, prompt, promptCont
             try {
                 const event = JSON.parse(buffer);
                 processOragerEvent(event, streamState, onLog, () => {
-                    structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId, runId: "", message: "Daemon session not found — started fresh" });
+                    structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId, runId, message: "Daemon session not found — started fresh" });
                 });
             }
             catch { /* ok */ }
@@ -762,7 +754,7 @@ async function executeViaDaemon(baseUrl, signingKey, agentId, prompt, promptCont
     }
     const { resultEvent, sessionId, resolvedModel, sessionLost, questionEvent } = streamState;
     if (!resultEvent) {
-        structuredLog({ level: "error", ts: Date.now(), event: "daemon_no_result", agentId, runId: "", message: "Daemon stream ended without a result event — daemon may have crashed or restarted" });
+        structuredLog({ level: "error", ts: Date.now(), event: "daemon_no_result", agentId, runId, message: "Daemon stream ended without a result event — daemon may have crashed or restarted" });
         return {
             exitCode: 1,
             signal: null,
@@ -789,7 +781,7 @@ async function executeViaDaemon(baseUrl, signingKey, agentId, prompt, promptCont
     });
     const daemonCostUsd = builtResult.costUsd ?? 0;
     if (maxCostUsdSoft !== undefined && daemonCostUsd >= maxCostUsdSoft) {
-        structuredLog({ level: "warn", ts: Date.now(), event: "soft_cost_limit", agentId, runId: "", costUsd: daemonCostUsd, message: `Run cost $${daemonCostUsd.toFixed(4)} exceeded soft limit $${maxCostUsdSoft}` });
+        structuredLog({ level: "warn", ts: Date.now(), event: "soft_cost_limit", agentId, runId, costUsd: daemonCostUsd, message: `Run cost $${daemonCostUsd.toFixed(4)} exceeded soft limit $${maxCostUsdSoft}` });
         void onLog("stderr", `[openrouter adapter] soft cost limit reached ($${daemonCostUsd.toFixed(4)} >= $${maxCostUsdSoft}) — consider adjusting maxCostUsd\n`);
     }
     return {
@@ -1136,6 +1128,10 @@ export async function executeAgentLoop(ctx) {
             }
         }
         return validated || undefined;
+    })();
+    const webhookFormat = (() => {
+        const raw = typeof config.webhookFormat === "string" ? config.webhookFormat.trim() : "";
+        return raw === "discord" ? "discord" : undefined;
     })();
     // Extended agent loop options
     const tagToolOutputs = typeof config.tagToolOutputs === "boolean" ? config.tagToolOutputs : undefined;
@@ -1664,6 +1660,8 @@ export async function executeAgentLoop(ctx) {
             obj.summarizeFallbackKeep = summarizeFallbackKeep;
         if (webhookUrl)
             obj.webhookUrl = webhookUrl;
+        if (webhookUrl && webhookFormat)
+            obj.webhookFormat = webhookFormat;
         if (hooks)
             obj.hooks = hooks;
         if (hookTimeoutMs !== undefined)
@@ -2018,7 +2016,6 @@ export async function executeAgentLoop(ctx) {
                         maxTurns: maxTurns > 0 ? maxTurns : 0,
                         maxRetries,
                         cwd,
-                        dangerouslySkipPermissions,
                         forceResume: forceResume || undefined,
                         verbose: false,
                         useFinishTool,
@@ -2026,7 +2023,6 @@ export async function executeAgentLoop(ctx) {
                         settingsFile: settingsFile || undefined,
                         siteUrl: siteUrl || undefined,
                         siteName: siteName || undefined,
-                        sandboxRoot: sandboxRoot || undefined,
                         parallel_tool_calls: parallelToolCalls,
                         tool_choice: toolChoice || undefined,
                         temperature,
@@ -2063,14 +2059,12 @@ export async function executeAgentLoop(ctx) {
                         maxCostUsdSoft,
                         costPerInputToken,
                         costPerOutputToken,
-                        requireApproval: effectiveRequireApproval,
                         summarizeAt,
                         summarizeModel: summarizeModel || undefined,
                         summarizeKeepRecentTurns,
                         tagToolOutputs,
                         planMode: planMode || undefined,
                         injectContext: injectContext || undefined,
-                        bashPolicy: Object.keys(bashPolicy).length > 0 ? bashPolicy : undefined,
                         trackFileChanges: trackFileChanges || undefined,
                         enableBrowserTools: enableBrowserTools || undefined,
                         readProjectInstructions,
@@ -2078,6 +2072,7 @@ export async function executeAgentLoop(ctx) {
                         summarizePrompt,
                         summarizeFallbackKeep,
                         webhookUrl,
+                        webhookFormat: (webhookUrl && webhookFormat) ? webhookFormat : undefined,
                         hooks,
                         hookTimeoutMs,
                         hookErrorMode,
@@ -2109,10 +2104,11 @@ export async function executeAgentLoop(ctx) {
                             }
                             : {}),
                         ...(asNumber(config.memoryMaxChars, 0) > 0 ? { memoryMaxChars: asNumber(config.memoryMaxChars, 0) } : {}),
+                        ...(asNumber(config.memoryRetrievalThreshold, -1) >= 0 ? { memoryRetrievalThreshold: asNumber(config.memoryRetrievalThreshold, 0) } : {}),
                     };
                 };
                 const daemonOpts = await buildDaemonRunOpts();
-                const daemonResult = await executeViaDaemon(daemonBaseUrl, signingKey, effectiveAgentId, prompt, promptContent, daemonOpts, timeoutSec, onLog, maxCostUsdSoft);
+                const daemonResult = await executeViaDaemon(daemonBaseUrl, signingKey, effectiveAgentId, runId, prompt, promptContent, daemonOpts, timeoutSec, onLog, maxCostUsdSoft);
                 if (daemonResult !== null) {
                     structuredLog({
                         level: "info",
@@ -2310,13 +2306,6 @@ export async function executeAgentLoop(ctx) {
         });
         proc.stderr?.on("data", (chunk) => {
             const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-            // String-match fallback for orager versions that predate the structured
-            // session_lost event (sprint2). processOragerEvent covers the structured
-            // path; this catches the plain-text stderr line for older builds.
-            if (text.includes(SESSION_NOT_FOUND_MARKER) && !spawnStreamState.sessionLost) {
-                spawnStreamState.sessionLost = true;
-                structuredLog({ level: "warn", ts: Date.now(), event: "session_not_found", agentId: agent.id, runId, sessionId: previousSessionId ?? undefined });
-            }
             void onLog("stderr", text);
         });
         proc.on("close", (code, signal) => {

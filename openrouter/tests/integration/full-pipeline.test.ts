@@ -51,7 +51,10 @@ const oragerDistExists = existsSync(ORAGER_DIST);
  * Multi-turn tests (tool calls, maxTurns, trackFileChanges) use IT_SLOW.
  */
 const IT = 45_000;
-const IT_SLOW = 90_000;
+// Multi-turn spawn-path tests are slow: they start a real orager process,
+// queue multiple mock LLM completions, and wait for the full run to finish.
+// 150 s gives headroom when test files run in parallel and compete for CPU.
+const IT_SLOW = 150_000;
 
 // ── SSE stream builders ───────────────────────────────────────────────────────
 
