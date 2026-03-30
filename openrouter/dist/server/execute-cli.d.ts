@@ -34,7 +34,41 @@ declare function buildApiKeyPool(config: Record<string, unknown>): {
     primary: string;
     pool: string[];
 };
-export declare const SESSION_NOT_FOUND_MARKER = "not found, starting fresh";
+/** The parsed shape of a "question" event from the orager event stream. */
+export type OragerQuestionEvent = {
+    type: "question";
+    prompt: string;
+    choices: Array<{
+        key: string;
+        label: string;
+        description?: string;
+    }>;
+    toolCallId: string;
+    toolName: string;
+};
+/** Mutable state accumulated while processing an orager event stream. */
+export interface OragerStreamState {
+    sessionId: string;
+    resolvedModel: string;
+    sessionLost: boolean;
+    resultEvent: Record<string, unknown> | null;
+    questionEvent: OragerQuestionEvent | null;
+}
+/**
+ * Process a single parsed orager NDJSON event and update `state` in place.
+ *
+ * Shared by the daemon (HTTP streaming) and spawn (stdout) paths so event
+ * handling stays in sync across both. Differences between paths — e.g. the
+ * structured-log call on session loss — are handled via the `onSessionLost`
+ * callback.
+ *
+ * @param event        - Parsed JSON object from the stream.
+ * @param state        - Mutable stream state to update.
+ * @param onLog        - Log sink (same signature as Paperclip's onLog).
+ * @param onSessionLost - Called (once) when a session-loss is detected so the
+ *                        caller can emit a path-specific structuredLog entry.
+ */
+export declare function processOragerEvent(event: Record<string, unknown>, state: OragerStreamState, onLog: (stream: "stdout" | "stderr", text: string) => Promise<void> | void, onSessionLost: () => void): void;
 declare let _lastAutoStartAttemptMs: number;
 declare const AUTO_START_COOLDOWN_MS: number;
 declare const DAEMON_CB_THRESHOLD = 3;

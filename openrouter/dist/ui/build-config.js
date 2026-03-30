@@ -219,6 +219,9 @@ export function buildOpenRouterConfig(v) {
     if (typeof vc.webhookUrl === "string" && vc.webhookUrl.trim()) {
         ac.webhookUrl = vc.webhookUrl.trim();
     }
+    if (vc.webhookFormat === "discord") {
+        ac.webhookFormat = "discord";
+    }
     // ── Extended summarization ────────────────────────────────────────────────
     if (typeof vc.summarizePrompt === "string" && vc.summarizePrompt.trim()) {
         ac.summarizePrompt = vc.summarizePrompt.trim();
@@ -293,9 +296,9 @@ export function buildOpenRouterConfig(v) {
         ac.agentId = vc.agentId.trim();
     }
     // ── Memory retrieval ──────────────────────────────────────────────────────
-    if (vc.memoryRetrieval === "embedding") {
-        ac.memoryRetrieval = "embedding";
-        if (typeof vc.memoryEmbeddingModel === "string" && vc.memoryEmbeddingModel.trim()) {
+    if (vc.memoryRetrieval === "embedding" || vc.memoryRetrieval === "fts" || vc.memoryRetrieval === "local") {
+        ac.memoryRetrieval = vc.memoryRetrieval;
+        if (vc.memoryRetrieval === "embedding" && typeof vc.memoryEmbeddingModel === "string" && vc.memoryEmbeddingModel.trim()) {
             ac.memoryEmbeddingModel = vc.memoryEmbeddingModel.trim();
         }
     }
