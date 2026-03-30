@@ -639,8 +639,10 @@ describe.skipIf(!oragerDistExists)("full pipeline — spawn path", () => {
     expect(mockServer.completionCalls.length).toBeLessThanOrEqual(4);
   }, IT_SLOW);
 
+  // IT_SLOW not needed: the wall-clock time is bounded by timeoutSec (4s) +
+  // a small grace period, so this test reliably completes well under IT (45s).
+  // The mock is set to delay 10s but orager is killed before it responds.
   it("timeoutSec: adapter kills orager process and returns timeout error", async () => {
-    // The mock delays 10s — well past the 4s timeout
     mockServer.queueSlow(10_000);
 
     const start = Date.now();
