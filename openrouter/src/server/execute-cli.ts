@@ -1378,6 +1378,12 @@ export async function executeAgentLoop(
       )
     : [];
 
+  // Apply :online to fallback models too — otherwise web-search silently
+  // disables the moment orager rotates to a fallback on API error. (audit F2/H4)
+  const effectiveModels = onlineSearch
+    ? models.map((m) => (m.includes(":") ? m : `${m}:online`))
+    : models;
+
   // Transforms
   const transforms = Array.isArray(config.transforms)
     ? config.transforms
@@ -1938,6 +1944,15 @@ export async function executeAgentLoop(
     // visionOk === true: confirmed, no action needed
   }
 
+  // Pre-read the instructions file once, shared by both spawn and daemon paths.
+  // Using appendSystemPrompt (string content) on both paths guarantees identical
+  // orager semantics regardless of which execution path is taken. Previously the
+  // spawn path sent systemPromptFile (a path string) while the daemon path sent
+  // appendSystemPrompt (file contents) — orager may treat these differently. (audit F6/H5)
+  const instructionsFileContent: string | undefined = safeInstructionsFilePath
+    ? await fs.readFile(safeInstructionsFilePath, "utf8").catch(() => undefined)
+    : undefined;
+
   // ── Build config object and write to temp file ────────────────────────────
   // Instead of building 50+ CLI args, we write all config to a temp JSON file
   // and pass --config-file <path> as the only config arg. This avoids argument
@@ -1959,7 +1974,7 @@ export async function executeAgentLoop(
     };
 
     if (previousSessionId) obj.sessionId = previousSessionId;
-    if (safeInstructionsFilePath) obj.systemPromptFile = safeInstructionsFilePath;
+    if (instructionsFileContent) obj.appendSystemPrompt = instructionsFileContent;
     if (dangerouslySkipPermissions) obj.dangerouslySkipPermissions = true;
     if (sandboxRoot) obj.sandboxRoot = sandboxRoot;
     if (useFinishTool) obj.useFinishTool = true;
@@ -2000,8 +2015,8 @@ export async function executeAgentLoop(
     if (quantizations) obj.quantizations = quantizations.split(",").filter(Boolean);
     if (preset) obj.preset = preset;
 
-    // Fallback models
-    if (models.length > 0) obj.models = models;
+    // Fallback models (with :online suffix already applied if onlineSearch is set)
+    if (effectiveModels.length > 0) obj.models = effectiveModels;
 
     // Transforms
     if (transforms) obj.transforms = transforms.split(",").filter(Boolean);
@@ -2382,7 +2397,7 @@ export async function executeAgentLoop(
         return {
           apiKey,
           model: effectiveModel,
-          models: models.length > 0 ? models : undefined,
+          models: effectiveModels.length > 0 ? effectiveModels : undefined,
           sessionId: previousSessionId || null,
           addDirs,
           maxTurns: maxTurns > 0 ? maxTurns : 0,
@@ -2455,9 +2470,7 @@ export async function executeAgentLoop(
           maxSpawnDepth,
           maxIdenticalToolCallTurns,
           toolErrorBudgetHardStop,
-          appendSystemPrompt: safeInstructionsFilePath
-            ? await fs.readFile(safeInstructionsFilePath, "utf8").catch(() => undefined)
-            : undefined,
+          appendSystemPrompt: instructionsFileContent,
           promptContent: promptContent ?? undefined,
           approvalMode,
           ...(approvalAnswer ? { approvalAnswer } : {}),
