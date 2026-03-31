@@ -70,7 +70,12 @@ async function listSessionsFromFilesystem(limit: number, offset: number): Promis
   let entries: string[];
   try {
     entries = await fs.readdir(getSessionsDir());
-  } catch {
+  } catch (err) {
+    // L-10: Log non-ENOENT errors so operators can diagnose session listing failures.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      process.stderr.write(`[openrouter adapter] sessions: readdir failed: ${code ?? err}\n`);
+    }
     return { sessions: [], total: 0, limit, offset };
   }
 
@@ -131,7 +136,12 @@ async function searchSessionsFromFilesystem(query: string, limit: number): Promi
   let entries: string[];
   try {
     entries = await fs.readdir(getSessionsDir());
-  } catch {
+  } catch (err) {
+    // L-10: Log non-ENOENT errors so operators can diagnose session search failures.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      process.stderr.write(`[openrouter adapter] sessions: readdir failed: ${code ?? err}\n`);
+    }
     return { sessions: [], total: 0, query };
   }
 
@@ -194,7 +204,9 @@ async function fetchFromDaemon<T>(
     });
     if (!res.ok) return null;
     return await res.json() as T;
-  } catch {
+  } catch (err) {
+    // L-10: Log daemon fetch failures for debugging session retrieval issues.
+    process.stderr.write(`[openrouter adapter] sessions: daemon fetch failed for ${endpoint}: ${err instanceof Error ? err.message : String(err)}\n`);
     return null;
   }
 }

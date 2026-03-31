@@ -40,11 +40,34 @@ interface StructuredLogEntry {
 // Capped at 10,000 entries (ring-buffer eviction) so long-lived Paperclip
 // worker processes do not accumulate unbounded memory across thousands of runs.
 const LOG_BUFFER_MAX = 10_000;
-const _structuredLogBuffer: StructuredLogEntry[] = [];
+
+// L-09: Ring buffer for O(1) eviction instead of O(n) Array.shift().
+class RingBuffer<T> {
+  private _buf: T[] = [];
+  private _head = 0;
+  private _size = 0;
+  constructor(private _cap: number) {}
+  push(item: T): void {
+    if (this._size < this._cap) {
+      this._buf.push(item);
+      this._size++;
+    } else {
+      this._buf[this._head] = item;
+      this._head = (this._head + 1) % this._cap;
+    }
+  }
+  toArray(): T[] {
+    if (this._size < this._cap) return this._buf.slice();
+    return [...this._buf.slice(this._head), ...this._buf.slice(0, this._head)];
+  }
+  get length(): number { return this._size; }
+  clear(): void { this._buf.length = 0; this._head = 0; this._size = 0; }
+}
+
+const _structuredLogBuffer = new RingBuffer<StructuredLogEntry>(LOG_BUFFER_MAX);
 
 function structuredLog(entry: StructuredLogEntry): void {
   _structuredLogBuffer.push(entry);
-  if (_structuredLogBuffer.length > LOG_BUFFER_MAX) _structuredLogBuffer.shift();
   if (!STRUCTURED_LOG_FILE) return;
   try {
     appendFileSync(STRUCTURED_LOG_FILE, JSON.stringify({ ...entry, ts: entry.ts }) + "\n");
@@ -443,16 +466,25 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 // skills/ dir is at the root of the adapter package (two levels up from dist/server/)
 const SKILLS_DIR = path.resolve(__dirname, "..", "..", "skills");
-// Warn at load time if the bundled skills directory is missing — this can happen
-// when the package is loaded from an unexpected location (symlink, monorepo hoisting).
-// Non-fatal: addDirs will include a non-existent path, which orager silently ignores.
-fs.stat(SKILLS_DIR).then((s) => {
-  if (!s.isDirectory()) {
-    process.stderr.write(`[openrouter adapter] WARNING: bundled skills directory is not a directory: ${SKILLS_DIR}\n`);
+// L-13: Skills directory validation moved from module-level floating promise
+// to lazy, cached check on first use.
+let _skillsDirChecked = false;
+let _skillsDirValid = false;
+async function ensureSkillsDirChecked(): Promise<boolean> {
+  if (_skillsDirChecked) return _skillsDirValid;
+  _skillsDirChecked = true;
+  try {
+    const s = await fs.stat(SKILLS_DIR);
+    _skillsDirValid = s.isDirectory();
+    if (!_skillsDirValid) {
+      process.stderr.write(`[openrouter adapter] WARNING: bundled skills directory is not a directory: ${SKILLS_DIR}\n`);
+    }
+  } catch {
+    process.stderr.write(`[openrouter adapter] WARNING: bundled skills directory not found: ${SKILLS_DIR} — Paperclip skills (get-task, post-comment, etc.) will not be available\n`);
+    _skillsDirValid = false;
   }
-}).catch(() => {
-  process.stderr.write(`[openrouter adapter] WARNING: bundled skills directory not found: ${SKILLS_DIR} — Paperclip skills (get-task, post-comment, etc.) will not be available\n`);
-});
+  return _skillsDirValid;
+}
 import type {
   AdapterExecutionContext,
   AdapterExecutionResult,
@@ -1227,6 +1259,8 @@ export async function executeAgentLoop(
   const { runId, agent, runtime, config, context, onLog, onMeta, authToken } =
     ctx;
 
+  void _ensureVisionCacheWarmed();
+
   // ── Config ─────────────────────────────────────────────────────────────────
   // Support both cliPath and the generic "command" field from the Paperclip UI
   const cliPath = asString(config.cliPath ?? config.command, DEFAULT_CLI);
@@ -1524,10 +1558,12 @@ export async function executeAgentLoop(
   const injectContext = asBoolean(config.injectContext, false);
   const bashPolicy = parseObject(config.bashPolicy);
   const hooksRaw = parseObject(config.hooks);
+  // L-12: Accept both string and object-valued hooks. Previously only string
+  // hooks were kept, silently dropping structured hook configurations.
   const hooks = Object.keys(hooksRaw).length > 0
     ? Object.fromEntries(
-        Object.entries(hooksRaw).filter(([, v]) => typeof v === "string"),
-      ) as Record<string, string>
+        Object.entries(hooksRaw).filter(([, v]) => typeof v === "string" || (typeof v === "object" && v !== null)),
+      ) as Record<string, unknown>
     : undefined;
   const trackFileChanges = asBoolean(config.trackFileChanges, false);
   const enableBrowserTools = asBoolean(config.enableBrowserTools, false);
@@ -1595,7 +1631,8 @@ export async function executeAgentLoop(
     }
     structuredLog({ level: "info", ts: Date.now(), event: "skills_linked", agentId: agent.id, runId, message: `Linked ${ephemeralSkillsDir.linked.length} skill(s) into ephemeral dir: ${ephemeralSkillsDir.linked.join(", ") || "(none)"}` });
   }
-  const addDirs: string[] = ephemeralSkillsDir ? [ephemeralSkillsDir.dir] : [SKILLS_DIR];
+  const skillsDirOk = await ensureSkillsDirChecked();
+  const addDirs: string[] = ephemeralSkillsDir ? [ephemeralSkillsDir.dir] : (skillsDirOk ? [SKILLS_DIR] : []);
   if (Array.isArray(config.addDirs)) {
     for (const d of config.addDirs) {
       if (typeof d === "string" && d.trim()) addDirs.push(d.trim());
@@ -2632,7 +2669,7 @@ export async function executeAgentLoop(
             proc.kill("SIGTERM");
           }
         } catch {
-          proc.kill("SIGTERM");
+          try { proc.kill("SIGTERM"); } catch { /* M-19: process may have already exited */ }
         }
         // Force kill after grace period if the process doesn't exit on its own
         if (graceSec > 0) {
@@ -2644,7 +2681,7 @@ export async function executeAgentLoop(
                 proc.kill("SIGKILL");
               }
             } catch {
-              proc.kill("SIGKILL");
+              try { proc.kill("SIGKILL"); } catch { /* M-19: process may have already exited */ }
             }
           }, graceSec * 1000);
         }
@@ -2670,7 +2707,7 @@ export async function executeAgentLoop(
         try {
           if (proc.pid != null) process.kill(-proc.pid, "SIGTERM");
           else proc.kill("SIGTERM");
-        } catch { proc.kill("SIGTERM"); }
+        } catch { try { proc.kill("SIGTERM"); } catch { /* M-19: process may have already exited */ } }
         return;
       }
       if (responseTruncated) return;
@@ -2852,13 +2889,18 @@ export function _resetStateForTesting(): void {
   _visionCache.clear();
   _daemonCircuitState.clear();
   _lastAutoStartAttemptMs = 0;
-  _structuredLogBuffer.length = 0;
+  _structuredLogBuffer.clear();
+  _skillsDirChecked = false;
+  _skillsDirValid = false;
+  _visionPrewarmDone = false;
   _resetModelCacheForTesting();
 }
 
 /** Drain and return all structured log entries captured since the last reset. */
 export function _drainStructuredLogForTesting(): StructuredLogEntry[] {
-  return _structuredLogBuffer.splice(0);
+  const entries = _structuredLogBuffer.toArray();
+  _structuredLogBuffer.clear();
+  return entries;
 }
 export {
   buildApiKeyPool,
@@ -2879,13 +2921,12 @@ export {
   COST_ANOMALY_COOLDOWN_RUNS,
 };
 
-// ── Vision cache pre-warm ─────────────────────────────────────────────────
-// When the live model list is already populated (e.g. from a prior
-// listOpenRouterModels() call triggered by the UI dropdown), the vision
-// cache is filled for free. This background fetch ensures the cache is
-// warm for the first run even when the UI has not requested the model list.
-// Non-fatal: failures are silently ignored so they never affect a run.
-(async () => {
+// M-18: Vision cache pre-warm is now lazy — triggered on first executeAgentLoop
+// call instead of firing a network request on every module import.
+let _visionPrewarmDone = false;
+async function _ensureVisionCacheWarmed(): Promise<void> {
+  if (_visionPrewarmDone) return;
+  _visionPrewarmDone = true;
   const apiKey = process.env.OPENROUTER_API_KEY ?? "";
   if (!apiKey) return;
   const base = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/$/, "");
@@ -2904,6 +2945,6 @@ export {
       _visionCache.set(entry.id, { supported, ts: Date.now() });
     }
   } catch {
-    // Never fail module load due to a pre-warm error
+    // Never fail a run due to a pre-warm error
   }
-})();
+}
