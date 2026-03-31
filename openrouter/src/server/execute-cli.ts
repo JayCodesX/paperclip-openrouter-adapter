@@ -266,7 +266,16 @@ export function processOragerEvent(
     state.resultEvent = event;
   }
   if (event.type === "question" && !state.questionEvent) {
-    state.questionEvent = event as OragerQuestionEvent;
+    // M-20: Validate shape before casting — ensure required fields exist with
+    // correct types to prevent downstream crashes from malformed events.
+    if (
+      typeof event.prompt === "string" &&
+      Array.isArray(event.choices) &&
+      typeof event.toolCallId === "string" &&
+      typeof event.toolName === "string"
+    ) {
+      state.questionEvent = event as OragerQuestionEvent;
+    }
   }
 }
 
@@ -934,18 +943,30 @@ async function executeViaDaemon(
             `[openrouter adapter] WARNING: oversized stream segment (~${discarded.length} bytes) may contain a result/question event — attempting to parse\n`
           );
           structuredLog({ level: "warn", ts: Date.now(), event: "daemon_oversized_segment_critical", agentId, segmentBytes: discarded.length, message: "Oversized segment contains result/question event — attempting recovery" });
-          // Try to extract and process the critical event from the oversized line
-          const criticalMatch = discarded.match(/\{"type":"(?:result|question)"[^\n]*/);
-          if (criticalMatch) {
+          // M-21: Split by newlines first, then attempt parsing each line.
+          // The previous regex approach used greedy [^\n]* which could capture
+          // malformed partial JSON from adjacent events.
+          let recoveredCritical = false;
+          for (const candidateLine of discarded.split("\n")) {
+            const trimmed = candidateLine.trim();
+            if (!trimmed.startsWith("{")) continue;
             try {
-              const event = JSON.parse(criticalMatch[0]) as Record<string, unknown>;
-              if (event.type === "result") streamState.resultEvent = event;
+              const event = JSON.parse(trimmed) as Record<string, unknown>;
+              if (event.type === "result") {
+                streamState.resultEvent = event;
+                recoveredCritical = true;
+              }
+              if (event.type === "question") {
+                processOragerEvent(event, streamState, onLog, () => {});
+                recoveredCritical = true;
+              }
             } catch {
-              // Parse failed — the result event is unrecoverable. Log so operators
-              // know the run will end with a synthesised error rather than silently.
-              structuredLog({ level: "error", ts: Date.now(), event: "daemon_oversized_segment_unrecoverable", agentId, segmentBytes: discarded.length, message: "Could not parse result event from oversized segment — run will end with synthesised error" });
-              void onLog("stderr", `[openrouter adapter] ERROR: could not parse result event from oversized segment (${discarded.length} bytes) — run result lost\n`);
+              // Individual line parse failure — try next line
             }
+          }
+          if (!recoveredCritical) {
+            structuredLog({ level: "error", ts: Date.now(), event: "daemon_oversized_segment_unrecoverable", agentId, segmentBytes: discarded.length, message: "Could not parse result event from oversized segment — run will end with synthesised error" });
+            void onLog("stderr", `[openrouter adapter] ERROR: could not parse result event from oversized segment (${discarded.length} bytes) — run result lost\n`);
           }
         } else {
           void onLog("stderr",
@@ -2032,9 +2053,13 @@ export async function executeAgentLoop(
 
   const configObj = buildConfigFilePayload();
 
-  // Write config to a crypto-random temp file, chmod 600 before writing content
+  // M-27: Write config to a user-private directory instead of world-listable /tmp.
+  // ~/.orager/tmp/ is only readable by the current user, preventing filename
+  // discovery by other users on multi-tenant systems.
+  const privateDir = path.join(os.homedir(), ".orager", "tmp");
+  await fs.mkdir(privateDir, { recursive: true, mode: 0o700 });
   const configFileName = `orager-config-${crypto.randomBytes(16).toString("hex")}.json`;
-  const configFilePath = path.join(os.tmpdir(), configFileName);
+  const configFilePath = path.join(privateDir, configFileName);
   let configFileWritten = false;
   try {
     // Create the file with mode 600 (owner read/write only) before writing content
@@ -2493,6 +2518,8 @@ export async function executeAgentLoop(
     if (configFileWritten) {
       await fs.unlink(configFilePath).catch(() => {});
     }
+    // M-25: Clean up ephemeral skills directory — was previously orphaned here
+    if (ephemeralSkillsDir) await cleanupOragerSkillsDir(ephemeralSkillsDir.dir);
     return {
       exitCode: 1,
       signal: null,
