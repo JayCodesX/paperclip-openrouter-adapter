@@ -83,7 +83,7 @@ describe("CLI not found", () => {
     await executeAgentLoop(ctx);
 
     // At least one unlink should target a file in os.tmpdir()
-    expect(unlinkedPaths.some((p) => p.startsWith(os.tmpdir()))).toBe(true);
+    expect(unlinkedPaths.some((p) => p.includes(".orager/tmp/"))).toBe(true);
   });
 });
 
@@ -124,7 +124,7 @@ describe("dryRun mode", () => {
     const ctx = makeCtx({ dryRun: true, cliPath: "/nonexistent/binary" });
     await executeAgentLoop(ctx);
 
-    expect(unlinkedPaths.some((p) => p.startsWith(os.tmpdir()))).toBe(true);
+    expect(unlinkedPaths.some((p) => p.includes(".orager/tmp/"))).toBe(true);
   });
 });
 

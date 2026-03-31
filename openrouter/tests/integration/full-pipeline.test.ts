@@ -29,7 +29,6 @@ import { fileURLToPath } from "node:url";
 import {
   executeAgentLoop,
   _resetStateForTesting,
-  recordRunCost,
 } from "../../src/server/execute-cli.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -682,47 +681,7 @@ describe.skipIf(!oragerDistExists)("full pipeline — spawn path", () => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe.skipIf(!oragerDistExists)("cost anomaly detection", () => {
-
-  it("warns on stderr when run cost exceeds 2x rolling average", async () => {
-    // Pre-populate cost window with cheap runs ($0.0001 each)
-    recordRunCost(0.0001);
-    recordRunCost(0.0001);
-    recordRunCost(0.0001);
-    // avg = 0.0001; threshold = 0.0002
-
-    // Make the generation endpoint report a cost well above the threshold
-    mockServer.setGenerationCost(0.001); // 10x average
-    mockServer.queueText("Expensive run done.");
-
-    const { ctx, onLog } = makeCtx();
-    const result = await executeAgentLoop(ctx);
-
-    expect(result.exitCode).toBe(0);
-    const lines = logLines(onLog);
-    const hasAnomaly = lines.some((l) => l.includes("COST ANOMALY"));
-    expect(hasAnomaly).toBe(true);
-  }, IT);
-
-  it("no warning when cost is within 2x rolling average", async () => {
-    recordRunCost(0.001);
-    recordRunCost(0.001);
-    recordRunCost(0.001);
-    // avg = 0.001; threshold = 0.002
-
-    mockServer.setGenerationCost(0.0015); // 1.5x — under threshold
-    mockServer.queueText("Normal run done.");
-
-    const { ctx, onLog } = makeCtx();
-    const result = await executeAgentLoop(ctx);
-
-    expect(result.exitCode).toBe(0);
-    const lines = logLines(onLog);
-    const hasAnomaly = lines.some((l) => l.includes("COST ANOMALY"));
-    expect(hasAnomaly).toBe(false);
-  }, IT);
-
-});
+// Cost anomaly detection tests removed — moved to orager engine in refactor 99f8e3a.
 
 // ─────────────────────────────────────────────────────────────────────────────
 

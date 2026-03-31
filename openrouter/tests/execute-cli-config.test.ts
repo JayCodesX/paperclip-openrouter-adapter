@@ -269,7 +269,7 @@ describe("spawn error event cleanup", () => {
     await executeAgentLoop(ctx);
 
     // The run should fail (cli_not_found or spawn_error — either path unlinks)
-    expect(unlinkedPaths.some((p) => p.startsWith(os.tmpdir()))).toBe(true);
+    expect(unlinkedPaths.some((p) => p.includes(".orager/tmp/"))).toBe(true);
   });
 });
 
