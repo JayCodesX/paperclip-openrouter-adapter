@@ -161,6 +161,22 @@ describe("pruneExpired", () => {
     const pruned = pruneExpired(store);
     expect(pruned).toBe(store);
   });
+
+  // N-11: Timezone-safe date comparison tests
+  it("N-11: correctly prunes expired entries with +00:00 timezone format", () => {
+    const past = new Date(Date.now() - 10_000).toISOString().replace("Z", "+00:00");
+    const store = makeStore([{ content: "expired-tz", expiresAt: past, importance: 2 }]);
+    const pruned = pruneExpired(store);
+    expect(pruned.entries).toHaveLength(0);
+  });
+
+  it("N-11: correctly keeps future entries regardless of timezone format", () => {
+    // Use a future date with explicit +00:00 offset instead of Z
+    const future = new Date(Date.now() + 60_000).toISOString().replace("Z", "+00:00");
+    const store = makeStore([{ content: "future-tz", expiresAt: future, importance: 2 }]);
+    const pruned = pruneExpired(store);
+    expect(pruned.entries).toHaveLength(1);
+  });
 });
 
 // ── applySkillResult ──────────────────────────────────────────────────────────
