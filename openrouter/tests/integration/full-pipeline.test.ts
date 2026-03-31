@@ -25,8 +25,10 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-/** Path to the built orager dist entry. Used for the shell wrapper. */
-const ORAGER_DIST = path.resolve(__dirname, "../../../../orager/dist/index.js");
+/** Path to the built orager dist entry. Used for the shell wrapper.
+ *  Override with ORAGER_DIST env var for CI where the repo layout differs. */
+const ORAGER_DIST = process.env.ORAGER_DIST
+  || path.resolve(__dirname, "../../../../orager/dist/index.js");
 
 /**
  * Skip all integration tests when the orager dist is absent (e.g. CI without
