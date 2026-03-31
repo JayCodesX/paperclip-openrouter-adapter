@@ -2656,6 +2656,13 @@ export async function executeAgentLoop(
       }
 
       if (timedOut) {
+        // Clean up config temp file containing API keys (audit B-05)
+        if (configFilePath) {
+          fs.unlink(configFilePath).catch(() => {});
+        }
+        if (ephemeralSkillsDir) {
+          fs.rm(ephemeralSkillsDir.dir, { recursive: true, force: true }).catch(() => {});
+        }
         settle({
           exitCode: null,
           signal: "SIGTERM",
@@ -2753,6 +2760,13 @@ export async function executeAgentLoop(
     proc.on("error", (err: Error) => {
       if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
       if (graceTimer !== undefined) clearTimeout(graceTimer);
+      // Clean up config temp file containing API keys (audit B-05)
+      if (configFilePath) {
+        fs.unlink(configFilePath).catch(() => {});
+      }
+      if (ephemeralSkillsDir) {
+        fs.rm(ephemeralSkillsDir.dir, { recursive: true, force: true }).catch(() => {});
+      }
       settle({
         exitCode: 1,
         signal: null,
