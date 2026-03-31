@@ -7,6 +7,7 @@ const CACHE_TTL_MS = 5 * 60_000; // 5 minutes — aligns with execute-cli.ts vis
 export type AdapterModel = { id: string; label: string; supportsVision: boolean };
 
 let cached: { expiresAt: number; models: AdapterModel[] } | null = null;
+let _fetchInFlight: Promise<AdapterModel[]> | null = null;
 
 async function fetchModels(): Promise<AdapterModel[]> {
   const controller = new AbortController();
@@ -47,7 +48,12 @@ export async function listOpenRouterModels(): Promise<AdapterModel[]> {
   const now = Date.now();
   if (cached && cached.expiresAt > now) return cached.models;
 
-  const fetched = await fetchModels();
+  // L-11: Deduplicate concurrent expired-cache fetches — return the
+  // in-flight promise if another caller already started a fetch.
+  if (_fetchInFlight) return _fetchInFlight;
+
+  _fetchInFlight = fetchModels().finally(() => { _fetchInFlight = null; });
+  const fetched = await _fetchInFlight;
   if (fetched.length > 0) {
     cached = { expiresAt: now + CACHE_TTL_MS, models: fetched };
     return fetched;
@@ -71,4 +77,5 @@ export function getModelFromLiveCache(model: string): AdapterModel | undefined {
 
 export function _resetModelCacheForTesting(): void {
   cached = null;
+  _fetchInFlight = null;
 }
