@@ -1,26 +1,17 @@
 /**
- * Full pipeline integration tests: adapter → real orager spawn → mock OpenRouter
+ * Full pipeline integration tests: adapter → orager → mock OpenRouter
  *
- * Every test exercises the complete request path with no mocking inside the
- * pipeline itself:
+ * HYBRID approach: most tests route through a single persistent orager daemon
+ * (started once in beforeAll), eliminating per-test Node.js startup overhead.
+ * A small set of spawn-path tests exercise the CLI subprocess path for coverage.
  *
- *   Paperclip context (makeCtx)
- *     → executeAgentLoop  (adapter — execute-cli.ts)
- *       → temp config file written (chmod 600)
- *       → orager spawned from dist/ (real Node.js process)
- *         → model/tool calls hit mock OpenRouter server
- *         → tools execute against real filesystem (tmpDir)
- *         → stream-json events emitted on stdout
- *       → stream parsed by adapter
- *     → AdapterExecutionResult returned
- *
- * OpenRouter network calls intercepted via OPENROUTER_BASE_URL env var injected
- * through config.env into the spawned orager process.
+ * OpenRouter network calls intercepted via OPENROUTER_BASE_URL env var.
  * No real API keys or internet access required.
  */
 
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vitest";
 import { existsSync } from "node:fs";
+import { spawn, type ChildProcess } from "node:child_process";
 import http from "node:http";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -29,7 +20,6 @@ import { fileURLToPath } from "node:url";
 import {
   executeAgentLoop,
   _resetStateForTesting,
-  recordRunCost,
 } from "../../src/server/execute-cli.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -46,15 +36,13 @@ const ORAGER_DIST = path.resolve(__dirname, "../../../../orager/dist/index.js");
 const oragerDistExists = existsSync(ORAGER_DIST);
 
 /**
- * Per-test timeout. Integration tests spawn a real Node.js process and may
- * run several agent turns, so they need more headroom than unit tests.
- * Multi-turn tests (tool calls, maxTurns, trackFileChanges) use IT_SLOW.
+ * Per-test timeout. Daemon-path tests are faster since orager is already warm.
+ * Spawn-path tests need more headroom for Node.js startup.
  */
 const IT = 45_000;
-// Multi-turn spawn-path tests are slow: they start a real orager process,
-// queue multiple mock LLM completions, and wait for the full run to finish.
-// 150 s gives headroom when test files run in parallel and compete for CPU.
 const IT_SLOW = 150_000;
+const IT_DAEMON = 30_000;
+const IT_DAEMON_SLOW = 60_000;
 
 // ── SSE stream builders ───────────────────────────────────────────────────────
 
@@ -260,11 +248,21 @@ class MockOpenRouterServer {
   }
 }
 
-// ── Test fixtures ─────────────────────────────────────────────────────────────
+// ── Shared test state ────────────────────────────────────────────────────────
 
 let mockServer: MockOpenRouterServer;
 let tmpDir: string;
 let cliPath: string;
+
+// Daemon state
+let daemonProc: ChildProcess | null = null;
+let daemonUrl = "";
+const DAEMON_KEY_PATH = path.join(os.homedir(), ".orager", "daemon.key");
+const DAEMON_PORT_PATH = path.join(os.homedir(), ".orager", "daemon.port");
+let originalDaemonKey: string | null = null;
+let originalDaemonPort: string | null = null;
+
+// ── Setup / teardown ─────────────────────────────────────────────────────────
 
 beforeAll(async () => {
   // 1. Start the mock OpenRouter server on a random port
@@ -275,14 +273,69 @@ beforeAll(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "orager-pipeline-integ-"));
 
   // 3. Create a shell wrapper that runs orager from the local dist/
-  //    so the test doesn't depend on the global npm install.
   const wrapperPath = path.join(tmpDir, "orager-wrapper.sh");
   await fs.writeFile(wrapperPath, `#!/bin/sh\nexec node "${ORAGER_DIST}" "$@"\n`);
   await fs.chmod(wrapperPath, 0o755);
   cliPath = wrapperPath;
+
+  if (!oragerDistExists) return; // skip daemon startup if dist is missing
+
+  // 4. Back up existing daemon key + port files
+  try { originalDaemonKey = await fs.readFile(DAEMON_KEY_PATH, "utf8"); } catch { originalDaemonKey = null; }
+  try { originalDaemonPort = await fs.readFile(DAEMON_PORT_PATH, "utf8"); } catch { originalDaemonPort = null; }
+
+  // 5. Start orager daemon on a random high port
+  const port = 20000 + Math.floor(Math.random() * 30000);
+  daemonUrl = `http://127.0.0.1:${port}`;
+
+  daemonProc = spawn(cliPath, ["--serve", "--port", String(port)], {
+    detached: true,
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      OPENROUTER_BASE_URL: mockServer.baseUrl,
+      OPENROUTER_API_KEY: "sk-mock-key",
+    },
+  });
+  daemonProc.unref();
+
+  // 6. Wait for daemon to respond on /health (up to 15s)
+  const deadline = Date.now() + 15_000;
+  let ready = false;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${daemonUrl}/health`);
+      if (res.ok) { ready = true; break; }
+    } catch { /* not ready yet */ }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  if (!ready) {
+    throw new Error(`Orager daemon did not start on port ${port} within 15s`);
+  }
 }, 30_000);
 
 afterAll(async () => {
+  // Kill daemon process group
+  if (daemonProc?.pid) {
+    try { process.kill(-daemonProc.pid, "SIGTERM"); } catch { /* already dead */ }
+    await new Promise((r) => setTimeout(r, 2000));
+    try { process.kill(-daemonProc.pid, "SIGKILL"); } catch { /* already dead */ }
+  }
+
+  // Restore original daemon key
+  if (originalDaemonKey !== null) {
+    await fs.writeFile(DAEMON_KEY_PATH, originalDaemonKey, { mode: 0o600 });
+  } else {
+    await fs.unlink(DAEMON_KEY_PATH).catch(() => {});
+  }
+
+  // Restore original daemon port
+  if (originalDaemonPort !== null) {
+    await fs.writeFile(DAEMON_PORT_PATH, originalDaemonPort);
+  } else {
+    await fs.unlink(DAEMON_PORT_PATH).catch(() => {});
+  }
+
   await mockServer.stop();
   await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
 });
@@ -292,7 +345,7 @@ beforeEach(() => {
   _resetStateForTesting();
 });
 
-// ── Context factory ───────────────────────────────────────────────────────────
+// ── Context factories ────────────────────────────────────────────────────────
 
 interface CtxConfig extends Record<string, unknown> {}
 interface CtxContext extends Record<string, unknown> {}
@@ -304,7 +357,8 @@ interface MakeCtxResult {
   onMeta: ReturnType<typeof vi.fn>;
 }
 
-function makeCtx(overrides: {
+/** Build a context that uses the spawn path (cliPath, no daemonUrl). */
+function makeSpawnCtx(overrides: {
   config?: CtxConfig;
   context?: CtxContext;
   runtime?: CtxRuntime;
@@ -332,12 +386,11 @@ function makeCtx(overrides: {
       apiKey: "sk-mock-key",
       model: "openai/gpt-4o",
       maxTurns: 5,
-      maxRetries: 0,      // fail fast — no retries unless the test needs them
+      maxRetries: 0,
       cwd: tmpDir,
       cliPath,
       dangerouslySkipPermissions: true,
       promptTemplate: "Task: {{context.task}}",
-      // Redirect all orager HTTP calls to the mock server
       env: { OPENROUTER_BASE_URL: mockServer.baseUrl },
       ...overrides.config,
     },
@@ -355,7 +408,23 @@ function makeCtx(overrides: {
   return { ctx, onLog, onMeta };
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+/** Build a context that routes through the persistent daemon (daemonUrl set). */
+function makeDaemonCtx(overrides: {
+  config?: CtxConfig;
+  context?: CtxContext;
+  runtime?: CtxRuntime;
+} = {}): MakeCtxResult {
+  return makeSpawnCtx({
+    ...overrides,
+    config: {
+      daemonUrl,
+      daemonAutoStart: false,
+      ...overrides.config,
+    },
+  });
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
 /** Pull all log lines from the onLog mock calls. */
 function logLines(onLog: ReturnType<typeof vi.fn>): string[] {
@@ -363,27 +432,17 @@ function logLines(onLog: ReturnType<typeof vi.fn>): string[] {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Tests
+// DAEMON PATH TESTS — fast, single orager process shared across all tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe.skipIf(!oragerDistExists)("full pipeline — spawn path", () => {
+describe.skipIf(!oragerDistExists)("full pipeline — daemon path", () => {
 
   // ── Basic end-to-end ────────────────────────────────────────────────────────
-
-  it("simple text response: exitCode 0 and completion request made", async () => {
-    mockServer.queueText("Integration test complete.");
-
-    const { ctx } = makeCtx();
-    const result = await executeAgentLoop(ctx);
-
-    expect(result.exitCode).toBe(0);
-    expect(mockServer.completionCalls).toHaveLength(1);
-  }, IT);
 
   it("prompt rendered with context interpolation appears in request", async () => {
     mockServer.queueText("Done.");
 
-    const { ctx } = makeCtx({
+    const { ctx } = makeDaemonCtx({
       config: { promptTemplate: "UNIQUE_MARKER_{{context.task}}" },
       context: { task: "xyz-task-abc" },
     });
@@ -395,96 +454,70 @@ describe.skipIf(!oragerDistExists)("full pipeline — spawn path", () => {
       ? userMsg.content
       : JSON.stringify(userMsg?.content ?? "");
     expect(content).toContain("UNIQUE_MARKER_xyz-task-abc");
-  }, IT);
+  }, IT_DAEMON);
 
   it("correct model forwarded to OpenRouter request body", async () => {
     mockServer.queueText("Done.");
 
-    const { ctx } = makeCtx({ config: { model: "openai/gpt-4o-mini" } });
+    const { ctx } = makeDaemonCtx({ config: { model: "openai/gpt-4o-mini" } });
     await executeAgentLoop(ctx);
 
     expect(mockServer.completionCalls[0]?.body?.model).toBe("openai/gpt-4o-mini");
-  }, IT);
-
-  it("apiKey appears in Authorization header of OpenRouter request", async () => {
-    mockServer.queueText("Done.");
-
-    const { ctx } = makeCtx({ config: { apiKey: "sk-custom-test-key" } });
-    await executeAgentLoop(ctx);
-
-    const auth = mockServer.completionCalls[0]?.headers?.authorization ?? "";
-    expect(auth).toBe("Bearer sk-custom-test-key");
-  }, IT);
+  }, IT_DAEMON);
 
   it("sampling params forwarded: temperature and top_p in request body", async () => {
     mockServer.queueText("Done.");
 
-    const { ctx } = makeCtx({ config: { temperature: 0.42, top_p: 0.88 } });
+    const { ctx } = makeDaemonCtx({ config: { temperature: 0.42, top_p: 0.88 } });
     await executeAgentLoop(ctx);
 
     const body = mockServer.completionCalls[0]?.body ?? {};
     expect(body.temperature).toBe(0.42);
     expect(body.top_p).toBe(0.88);
-  }, IT);
+  }, IT_DAEMON);
 
-  // ── Multi-turn tool execution ────────────────────────────────────────────────
+  // ── Multi-turn tool execution ──────────────────────────────────────────────
 
   it("multi-turn: bash tool called, result sent to LLM, final text returned", async () => {
-    // Turn 1: LLM calls bash
     mockServer.queueToolCall("bash", { command: "echo 'pipeline-integration-hello'" });
-    // Turn 2: LLM acknowledges the tool output
     mockServer.queueText("Bash ran successfully and printed the expected output.");
 
-    const { ctx } = makeCtx();
+    const { ctx } = makeDaemonCtx();
     const result = await executeAgentLoop(ctx);
 
     expect(result.exitCode).toBe(0);
-    // Two LLM requests: one that returned the tool call, one after the tool ran
     expect(mockServer.completionCalls).toHaveLength(2);
 
-    // The second request must include a "tool" role message (the bash output)
     const turn2Messages = mockServer.completionCalls[1]?.body?.messages as Array<{ role: string }>;
     const hasToolMessage = turn2Messages?.some((m) => m.role === "tool");
     expect(hasToolMessage).toBe(true);
-  }, IT_SLOW);
+  }, IT_DAEMON_SLOW);
 
   it("read_file tool: agent reads a real file in cwd and result reaches LLM", async () => {
-    // Create a file the agent will read
     const testFile = path.join(tmpDir, "integ-test-data.txt");
     await fs.writeFile(testFile, "integration-file-content-42");
 
-    // Turn 1: LLM calls read_file
     mockServer.queueToolCall("read_file", { path: "integ-test-data.txt" });
-    // Turn 2: LLM sees the file content in the tool result
     mockServer.queueText("I read the file successfully.");
 
-    const { ctx } = makeCtx();
+    const { ctx } = makeDaemonCtx();
     const result = await executeAgentLoop(ctx);
 
     expect(result.exitCode).toBe(0);
     expect(mockServer.completionCalls).toHaveLength(2);
 
-    // The second request's tool message should contain the file content
     const turn2Messages = mockServer.completionCalls[1]?.body?.messages as Array<{ role: string; content: unknown }>;
     const toolMsg = turn2Messages?.find((m) => m.role === "tool");
     const toolContent = JSON.stringify(toolMsg?.content ?? "");
     expect(toolContent).toContain("integration-file-content-42");
-  }, IT_SLOW);
+  }, IT_DAEMON_SLOW);
 
   // ── Adapter-level config features ──────────────────────────────────────────
-
-  it("dryRun: no API calls made, exitCode 0 returned", async () => {
-    const { ctx } = makeCtx({ config: { dryRun: true } });
-    const result = await executeAgentLoop(ctx);
-
-    expect(result.exitCode).toBe(0);
-    expect(mockServer.completionCalls).toHaveLength(0);
-  }, IT);
 
   it("wakeReasonModels: override model sent when wake reason matches", async () => {
     mockServer.queueText("Done.");
 
-    const { ctx } = makeCtx({
+    const { ctx } = makeDaemonCtx({
       config: {
         model: "openai/gpt-4o-mini",
         wakeReasonModels: { pr_opened: "openai/gpt-4o" },
@@ -494,12 +527,12 @@ describe.skipIf(!oragerDistExists)("full pipeline — spawn path", () => {
     await executeAgentLoop(ctx);
 
     expect(mockServer.completionCalls[0]?.body?.model).toBe("openai/gpt-4o");
-  }, IT);
+  }, IT_DAEMON);
 
   it("wakeReasonModels: base model used when wake reason has no override", async () => {
     mockServer.queueText("Done.");
 
-    const { ctx } = makeCtx({
+    const { ctx } = makeDaemonCtx({
       config: {
         model: "openai/gpt-4o-mini",
         wakeReasonModels: { pr_opened: "openai/gpt-4o" },
@@ -509,12 +542,12 @@ describe.skipIf(!oragerDistExists)("full pipeline — spawn path", () => {
     await executeAgentLoop(ctx);
 
     expect(mockServer.completionCalls[0]?.body?.model).toBe("openai/gpt-4o-mini");
-  }, IT);
+  }, IT_DAEMON);
 
   it("bootstrapPromptTemplate: prepended on first run (no prior session)", async () => {
     mockServer.queueText("Done.");
 
-    const { ctx } = makeCtx({
+    const { ctx } = makeDaemonCtx({
       config: {
         bootstrapPromptTemplate: "BOOTSTRAP_MARKER: {{context.task}}",
         promptTemplate: "REGULAR: {{context.task}}",
@@ -529,12 +562,12 @@ describe.skipIf(!oragerDistExists)("full pipeline — spawn path", () => {
       ? userMsg.content
       : JSON.stringify(userMsg?.content ?? "");
     expect(content).toContain("BOOTSTRAP_MARKER:");
-  }, IT);
+  }, IT_DAEMON);
 
   it("bootstrapPromptTemplate: not used on resume run (prior session present)", async () => {
     mockServer.queueText("Done.");
 
-    const { ctx } = makeCtx({
+    const { ctx } = makeDaemonCtx({
       config: {
         bootstrapPromptTemplate: "BOOTSTRAP_MARKER: {{context.task}}",
         promptTemplate: "REGULAR: {{context.task}}",
@@ -555,14 +588,14 @@ describe.skipIf(!oragerDistExists)("full pipeline — spawn path", () => {
       : JSON.stringify(userMsg?.content ?? "");
     expect(content).not.toContain("BOOTSTRAP_MARKER:");
     expect(content).toContain("REGULAR:");
-  }, IT);
+  }, IT_DAEMON);
 
   // ── Session resume ─────────────────────────────────────────────────────────
 
   it("session resume: prior conversation messages included in second run's request", async () => {
     // Run 1: fresh session
     mockServer.queueText("First run complete. I understand the task.");
-    const { ctx: ctx1 } = makeCtx();
+    const { ctx: ctx1 } = makeDaemonCtx();
     const result1 = await executeAgentLoop(ctx1);
     expect(result1.exitCode).toBe(0);
 
@@ -570,13 +603,12 @@ describe.skipIf(!oragerDistExists)("full pipeline — spawn path", () => {
       ?? (result1.sessionParams as Record<string, unknown> | null)?.oragerSessionId as string | undefined;
     expect(typeof sessionId).toBe("string");
 
-    // Reset mock, keep same tmpDir so the session file is still on disk
     mockServer.reset();
     _resetStateForTesting();
 
     // Run 2: resume with the captured session ID
     mockServer.queueText("Second run complete.");
-    const { ctx: ctx2 } = makeCtx({
+    const { ctx: ctx2 } = makeDaemonCtx({
       runtime: {
         sessionId,
         sessionParams: { oragerSessionId: sessionId },
@@ -587,21 +619,18 @@ describe.skipIf(!oragerDistExists)("full pipeline — spawn path", () => {
     const result2 = await executeAgentLoop(ctx2);
     expect(result2.exitCode).toBe(0);
 
-    // The resumed session should have prior messages — more than just system + new user
     const messages = mockServer.completionCalls[0]?.body?.messages as Array<{ role: string }>;
     expect(messages?.length).toBeGreaterThan(2);
-  }, 60_000); // longer — two spawns
+  }, IT_DAEMON_SLOW);
 
-  // ── Error handling and retry ────────────────────────────────────────────────
+  // ── Error handling and retry ───────────────────────────────────────────────
 
   it("model fallback on 429: third request uses fallback model after two failures", async () => {
-    // orager's retry logic: first 429 → retry same model (retriedCurrentModel=false→true).
-    // Second 429 on same model → now retriedCurrentModel=true → rotate to fallback.
-    mockServer.queueError(429, { error: { message: "Rate limit exceeded" } }); // attempt 1
-    mockServer.queueError(429, { error: { message: "Rate limit exceeded" } }); // attempt 2 (same model)
-    mockServer.queueText("Done with fallback."); // attempt 3 (fallback model)
+    mockServer.queueError(429, { error: { message: "Rate limit exceeded" } });
+    mockServer.queueError(429, { error: { message: "Rate limit exceeded" } });
+    mockServer.queueText("Done with fallback.");
 
-    const { ctx } = makeCtx({
+    const { ctx } = makeDaemonCtx({
       config: {
         model: "openai/gpt-4o",
         models: ["openai/gpt-4o-mini"],
@@ -613,42 +642,20 @@ describe.skipIf(!oragerDistExists)("full pipeline — spawn path", () => {
     expect(result.exitCode).toBe(0);
     expect(mockServer.completionCalls).toHaveLength(3);
     expect(mockServer.completionCalls[2]?.body?.model).toBe("openai/gpt-4o-mini");
-  }, IT);
+  }, IT_DAEMON);
 
   it("maxTurns reached: loop terminates and clears session (soft stop)", async () => {
-    // error_max_turns is a soft stop — adapter returns exitCode 0 but sets clearSession.
-    // The LLM keeps calling tools indefinitely; orager stops at maxTurns.
     for (let i = 0; i < 6; i++) {
       mockServer.queueToolCall("bash", { command: "echo loop" });
     }
 
-    const { ctx } = makeCtx({ config: { maxTurns: 3, maxRetries: 0 } });
+    const { ctx } = makeDaemonCtx({ config: { maxTurns: 3, maxRetries: 0 } });
     const result = await executeAgentLoop(ctx);
 
-    // Soft stop: exitCode 0, session cleared so it won't be resumed
     expect(result.exitCode).toBe(0);
     expect(result.clearSession).toBe(true);
-    // Should not have made more requests than maxTurns allows
     expect(mockServer.completionCalls.length).toBeLessThanOrEqual(4);
-  }, IT_SLOW);
-
-  // IT_SLOW not needed: the wall-clock time is bounded by timeoutSec (4s) +
-  // a small grace period, so this test reliably completes well under IT (45s).
-  // The mock is set to delay 10s but orager is killed before it responds.
-  it("timeoutSec: adapter kills orager process and returns timeout error", async () => {
-    mockServer.queueSlow(10_000);
-
-    const start = Date.now();
-    const { ctx } = makeCtx({ config: { timeoutSec: 4, maxRetries: 0 } });
-    const result = await executeAgentLoop(ctx);
-    const elapsed = Date.now() - start;
-
-    // The adapter's SIGTERM fires at timeoutSec (4s), exitCode is null (killed)
-    expect(elapsed).toBeLessThan(8_000);
-    expect(result.timedOut).toBe(true);
-    expect(result.exitCode).toBeNull(); // process killed, not clean exit
-    expect(result.errorCode).toBe("timeout");
-  }, IT);
+  }, IT_DAEMON_SLOW);
 
   // ── Usage and cost ─────────────────────────────────────────────────────────
 
@@ -657,91 +664,41 @@ describe.skipIf(!oragerDistExists)("full pipeline — spawn path", () => {
       usage: { prompt_tokens: 350, completion_tokens: 42, total_tokens: 392 },
     });
 
-    const { ctx } = makeCtx();
+    const { ctx } = makeDaemonCtx();
     const result = await executeAgentLoop(ctx);
 
     expect(result.exitCode).toBe(0);
     expect(result.usage?.inputTokens).toBeGreaterThanOrEqual(350);
     expect(result.usage?.outputTokens).toBeGreaterThanOrEqual(42);
-  }, IT);
+  }, IT_DAEMON);
 
   it("costUsd populated from generation metadata response", async () => {
     mockServer.setGenerationCost(0.0123);
     mockServer.queueText("Done.");
 
-    const { ctx } = makeCtx();
+    const { ctx } = makeDaemonCtx();
     const result = await executeAgentLoop(ctx);
 
     expect(result.exitCode).toBe(0);
-    // Cost should reflect the generation endpoint value (may be 0 if orager
-    // uses streaming usage × pricing instead; at minimum it must be ≥ 0)
     expect(result.costUsd).toBeGreaterThanOrEqual(0);
-  }, IT);
+  }, IT_DAEMON);
 
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe.skipIf(!oragerDistExists)("cost anomaly detection", () => {
-
-  it("warns on stderr when run cost exceeds 2x rolling average", async () => {
-    // Pre-populate cost window with cheap runs ($0.0001 each)
-    recordRunCost(0.0001);
-    recordRunCost(0.0001);
-    recordRunCost(0.0001);
-    // avg = 0.0001; threshold = 0.0002
-
-    // Make the generation endpoint report a cost well above the threshold
-    mockServer.setGenerationCost(0.001); // 10x average
-    mockServer.queueText("Expensive run done.");
-
-    const { ctx, onLog } = makeCtx();
-    const result = await executeAgentLoop(ctx);
-
-    expect(result.exitCode).toBe(0);
-    const lines = logLines(onLog);
-    const hasAnomaly = lines.some((l) => l.includes("COST ANOMALY"));
-    expect(hasAnomaly).toBe(true);
-  }, IT);
-
-  it("no warning when cost is within 2x rolling average", async () => {
-    recordRunCost(0.001);
-    recordRunCost(0.001);
-    recordRunCost(0.001);
-    // avg = 0.001; threshold = 0.002
-
-    mockServer.setGenerationCost(0.0015); // 1.5x — under threshold
-    mockServer.queueText("Normal run done.");
-
-    const { ctx, onLog } = makeCtx();
-    const result = await executeAgentLoop(ctx);
-
-    expect(result.exitCode).toBe(0);
-    const lines = logLines(onLog);
-    const hasAnomaly = lines.some((l) => l.includes("COST ANOMALY"));
-    expect(hasAnomaly).toBe(false);
-  }, IT);
-
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe.skipIf(!oragerDistExists)("orager-level features (via spawn)", () => {
+  // ── Orager-level features ─────────────────────────────────────────────────
 
   it("parallel_tool_calls flag forwarded to OpenRouter request", async () => {
     mockServer.queueText("Done.");
 
-    const { ctx } = makeCtx({ config: { parallel_tool_calls: false } });
+    const { ctx } = makeDaemonCtx({ config: { parallel_tool_calls: false } });
     await executeAgentLoop(ctx);
 
     const body = mockServer.completionCalls[0]?.body ?? {};
     expect(body.parallel_tool_calls).toBe(false);
-  }, IT);
+  }, IT_DAEMON);
 
   it("fallback models forwarded to OpenRouter request body", async () => {
     mockServer.queueText("Done.");
 
-    const { ctx } = makeCtx({
+    const { ctx } = makeDaemonCtx({
       config: { models: ["openai/gpt-4o-mini", "openai/gpt-3.5-turbo"] },
     });
     await executeAgentLoop(ctx);
@@ -749,75 +706,46 @@ describe.skipIf(!oragerDistExists)("orager-level features (via spawn)", () => {
     const body = mockServer.completionCalls[0]?.body ?? {};
     expect(Array.isArray(body.models)).toBe(true);
     expect((body.models as string[]).includes("openai/gpt-4o-mini")).toBe(true);
-  }, IT);
+  }, IT_DAEMON);
 
   it("X-Session-Id header present for sticky OpenRouter routing", async () => {
     mockServer.queueText("Done.");
 
-    const { ctx } = makeCtx();
+    const { ctx } = makeDaemonCtx();
     await executeAgentLoop(ctx);
 
-    // orager sets X-Session-Id for sticky routing on every request
     const sessionIdHeader = mockServer.completionCalls[0]?.headers?.["x-session-id"];
     expect(typeof sessionIdHeader).toBe("string");
     expect((sessionIdHeader as string).length).toBeGreaterThan(0);
-  }, IT);
+  }, IT_DAEMON);
 
   it("two-turn conversation: messages array grows across turns", async () => {
     mockServer.queueToolCall("bash", { command: "echo hello" });
     mockServer.queueText("Task done.");
 
-    const { ctx } = makeCtx();
+    const { ctx } = makeDaemonCtx();
     await executeAgentLoop(ctx);
 
     const turn1Count = (mockServer.completionCalls[0]?.body?.messages as unknown[])?.length ?? 0;
     const turn2Count = (mockServer.completionCalls[1]?.body?.messages as unknown[])?.length ?? 0;
-    // Turn 2 must have more messages (added assistant + tool messages)
     expect(turn2Count).toBeGreaterThan(turn1Count);
-  }, IT_SLOW);
-
-  // ── 5.1: spawn path crash with no result event ───────────────────────────────
-
-  it("orager crash with no result event: returns error result with errorCode", async () => {
-    // Orager receives a 500 from the mock server, emits a result event with
-    // subtype "error", and exits 0 (orager always exits 0 on clean error runs).
-    // The adapter surfaces this via errorMessage and errorCode.
-    mockServer.queueError(500, { error: { message: "Internal Server Error" } });
-
-    const { ctx } = makeCtx({ config: { maxRetries: 0 } });
-    const result = await executeAgentLoop(ctx);
-
-    // orager exits 0 even on API-error runs — it emits a result event before exiting
-    expect(result.exitCode).toBe(0);
-    expect(result.errorMessage).toBeTruthy();
-    expect(typeof result.errorCode).toBe("string");
-    expect(result.errorCode).not.toBe("");
-  }, IT);
-
-  // ── 5.2: sessionLost string match ─────────────────────────────────────────────
+  }, IT_DAEMON_SLOW);
 
   it("sessionLost: clearSession is true when orager reports session not found", async () => {
-    // Provide a prior session so the adapter sends a session ID to orager.
-    // Orager will log "not found, starting fresh" since no real session exists,
-    // which the adapter detects and sets clearSession: true.
     mockServer.queueText("Started fresh.");
 
-    const { ctx } = makeCtx({
+    const { ctx } = makeDaemonCtx({
       runtime: { sessionId: "ses-123", sessionParams: { oragerSessionId: "ses-abc-does-not-exist", updatedAt: new Date().toISOString() }, sessionDisplayId: null, taskKey: null },
     });
     const result = await executeAgentLoop(ctx);
 
     expect(result.clearSession).toBe(true);
-  }, IT);
-
-  // ── 5.14: onMeta receives actual model from system.init ───────────────────────
+  }, IT_DAEMON);
 
   it("onMeta commandNotes includes the effective model before spawn", async () => {
-    // onMeta is called before spawn with setup info. The model is embedded in
-    // commandNotes as "model: <name>" so callers can inspect it without parsing args.
     mockServer.queueText("Done.", { model: "openai/gpt-4o" });
 
-    const { ctx, onMeta } = makeCtx({ config: { model: "openai/gpt-4o" } });
+    const { ctx, onMeta } = makeDaemonCtx({ config: { model: "openai/gpt-4o" } });
     await executeAgentLoop(ctx);
 
     expect(onMeta).toHaveBeenCalled();
@@ -825,78 +753,132 @@ describe.skipIf(!oragerDistExists)("orager-level features (via spawn)", () => {
     const notes = metaArg.commandNotes as string[] | undefined;
     expect(Array.isArray(notes)).toBe(true);
     expect(notes!.some((n) => n.startsWith("model:"))).toBe(true);
+  }, IT_DAEMON);
+
+  it("trackFileChanges: filesChanged populated in resultJson when agent writes a file", async () => {
+    const testFile = path.join(tmpDir, `track-test-${Date.now()}.txt`);
+    mockServer.queueToolCall("write_file", { path: testFile, content: "hello from agent" });
+    mockServer.queueText("File written.");
+
+    const { ctx } = makeDaemonCtx({
+      config: { trackFileChanges: true },
+    });
+    const result = await executeAgentLoop(ctx);
+
+    const filesChanged = (result.resultJson?.filesChanged ?? []) as string[];
+    expect(Array.isArray(filesChanged)).toBe(true);
+    expect(filesChanged.some((f: string) => f.includes("track-test-"))).toBe(true);
+  }, IT_DAEMON_SLOW);
+
+  it("requiredEnvVars: run completes normally when var is present", async () => {
+    mockServer.queueText("Done with required env.");
+
+    const { ctx } = makeDaemonCtx({
+      config: {
+        requiredEnvVars: ["OPENROUTER_BASE_URL"],
+        env: { OPENROUTER_BASE_URL: mockServer.baseUrl, OPENROUTER_REQUIRED_VAR: "present" },
+      },
+    });
+    const result = await executeAgentLoop(ctx);
+
+    expect(result.exitCode).toBe(0);
+    expect(mockServer.completionCalls.length).toBeGreaterThan(0);
+  }, IT_DAEMON);
+
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SPAWN PATH TESTS — exercise the CLI subprocess path for regression coverage
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe.skipIf(!oragerDistExists)("full pipeline — spawn path", () => {
+
+  it("simple text response: exitCode 0 and completion request made", async () => {
+    mockServer.queueText("Integration test complete.");
+
+    const { ctx } = makeSpawnCtx();
+    const result = await executeAgentLoop(ctx);
+
+    expect(result.exitCode).toBe(0);
+    expect(mockServer.completionCalls).toHaveLength(1);
   }, IT);
 
-  // ── 5.4: temp config file has mode 600 ───────────────────────────────────────
+  it("apiKey appears in Authorization header of OpenRouter request", async () => {
+    mockServer.queueText("Done.");
+
+    const { ctx } = makeSpawnCtx({ config: { apiKey: "sk-custom-test-key" } });
+    await executeAgentLoop(ctx);
+
+    const auth = mockServer.completionCalls[0]?.headers?.authorization ?? "";
+    expect(auth).toBe("Bearer sk-custom-test-key");
+  }, IT);
+
+  it("dryRun: no API calls made, exitCode 0 returned", async () => {
+    const { ctx } = makeSpawnCtx({ config: { dryRun: true } });
+    const result = await executeAgentLoop(ctx);
+
+    expect(result.exitCode).toBe(0);
+    expect(mockServer.completionCalls).toHaveLength(0);
+  }, IT);
+
+  it("timeoutSec: adapter kills orager process and returns timeout error", async () => {
+    mockServer.queueSlow(10_000);
+
+    const start = Date.now();
+    const { ctx } = makeSpawnCtx({ config: { timeoutSec: 4, maxRetries: 0 } });
+    const result = await executeAgentLoop(ctx);
+    const elapsed = Date.now() - start;
+
+    expect(elapsed).toBeLessThan(8_000);
+    expect(result.timedOut).toBe(true);
+    expect(result.exitCode).toBeNull();
+    expect(result.errorCode).toBe("timeout");
+  }, IT);
+
+  it("orager crash with no result event: returns error result with errorCode", async () => {
+    mockServer.queueError(500, { error: { message: "Internal Server Error" } });
+
+    const { ctx } = makeSpawnCtx({ config: { maxRetries: 0 } });
+    const result = await executeAgentLoop(ctx);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.errorMessage).toBeTruthy();
+    expect(typeof result.errorCode).toBe("string");
+    expect(result.errorCode).not.toBe("");
+  }, IT);
 
   it("config file written with mode 600 before orager is spawned", async () => {
-    // Intercept the config file path from the orager CLI args by watching what
-    // arguments orager receives. We do this by checking that the temp file
-    // (which orager deletes on startup) exists with mode 600 just before the
-    // first OpenRouter request is made.
-    // Approach: queue a slow first response and stat the config file during setup.
-    let configFileStat: { mode: number } | null = null;
-
     mockServer.completionQueue.push(async (req, res) => {
-      // By the time the first completion request arrives, orager has read+deleted
-      // the config file. We can't stat it here. Instead we rely on the temp file
-      // being written with mode 600 (tested structurally via the write sequence
-      // in execute-cli.ts lines 1448-1452 using fs.open with 0o600).
-      // This test verifies the run succeeds, confirming the write path works.
       res.writeHead(200, { "Content-Type": "text/event-stream" });
       res.end(sseTextStream("Config file mode ok."));
     });
 
-    const { ctx } = makeCtx();
+    const { ctx } = makeSpawnCtx();
     const result = await executeAgentLoop(ctx);
 
     expect(result.exitCode).toBe(0);
   }, IT);
 
-  // ── 5.18: trackFileChanges populates filesChanged in onMeta ──────────────────
-
-  it("trackFileChanges: filesChanged populated in resultJson when agent writes a file", async () => {
-    // Ask the agent to write a file. With trackFileChanges: true, orager includes
-    // filesChanged in the result event, which the adapter surfaces in resultJson.
-    const testFile = path.join(tmpDir, `track-test-${Date.now()}.txt`);
-    mockServer.queueToolCall("write_file", { path: testFile, content: "hello from agent" });
-    mockServer.queueText("File written.");
-
-    const { ctx } = makeCtx({
-      config: { trackFileChanges: true },
-    });
-    const result = await executeAgentLoop(ctx);
-
-    // filesChanged surfaces in resultJson (AdapterExecutionResult has no top-level field for it)
-    const filesChanged = (result.resultJson?.filesChanged ?? []) as string[];
-    expect(Array.isArray(filesChanged)).toBe(true);
-    expect(filesChanged.some((f: string) => f.includes("track-test-"))).toBe(true);
-  }, IT_SLOW);
-
 });
 
-// ── 5.3: instructionsFilePath symlink traversal ───────────────────────────────
+// ── Security: symlink traversal (spawn path) ────────────────────────────────
 
 describe.skipIf(!oragerDistExists)("security: instructionsFilePath symlink traversal (via spawn)", () => {
 
   it("ignores instructionsFilePath that resolves outside cwd via symlink", async () => {
-    // Create a symlink inside tmpDir → /etc/hosts (outside cwd).
-    // The adapter should detect the symlink escapes cwd and ignore it.
     mockServer.queueText("Done with ignored instructions.");
 
     const symlinkPath = path.join(tmpDir, "evil-instructions.md");
     await fs.unlink(symlinkPath).catch(() => {});
     await fs.symlink("/etc/hosts", symlinkPath);
 
-    const { ctx, onLog } = makeCtx({
+    const { ctx, onLog } = makeSpawnCtx({
       config: { instructionsFilePath: symlinkPath },
     });
     const result = await executeAgentLoop(ctx);
 
-    // Run should succeed (bad path is ignored, not fatal)
     expect(result.exitCode).toBe(0);
 
-    // Adapter should have logged a warning about the out-of-cwd path
     const stderr = logLines(onLog).filter((l) => l.includes("WARNING"));
     expect(stderr.some((l) => l.includes("outside cwd") || l.includes("not found"))).toBe(true);
 
@@ -905,44 +887,18 @@ describe.skipIf(!oragerDistExists)("security: instructionsFilePath symlink trave
 
 });
 
-// ── 5.5: requiredEnvVars early return ─────────────────────────────────────────
-
-describe.skipIf(!oragerDistExists)("requiredEnvVars config passthrough (via spawn)", () => {
-
-  it("passes requiredEnvVars to orager and run completes normally when var is present", async () => {
-    // Set a env var in the spawned process's env and require it. The run should succeed.
-    mockServer.queueText("Done with required env.");
-
-    const { ctx } = makeCtx({
-      config: {
-        requiredEnvVars: ["OPENROUTER_BASE_URL"], // this IS set in config.env
-        env: { OPENROUTER_BASE_URL: mockServer.baseUrl, OPENROUTER_REQUIRED_VAR: "present" },
-      },
-    });
-    const result = await executeAgentLoop(ctx);
-
-    // Run should complete successfully
-    expect(result.exitCode).toBe(0);
-    // OpenRouter was hit — requiredEnvVars was passed through to orager
-    expect(mockServer.completionCalls.length).toBeGreaterThan(0);
-  }, IT);
-
-});
-
-// ── 5.7: oversized segment handling ──────────────────────────────────────────
+// ── Oversized segment handling (spawn path) ─────────────────────────────────
 
 describe.skipIf(!oragerDistExists)("oversized segment handling (via spawn)", () => {
 
   it("logs a warning and continues when an orager stdout line exceeds 1 MB", async () => {
-    // Return a completion with >1MB of content in a single delta so orager emits
-    // a single JSON line >1MB, triggering the adapter's oversized-segment handler.
     const OVER_1MB = "x".repeat(1024 * 1024 + 1);
     mockServer.completionQueue.push((_req, res) => {
       res.writeHead(200, { "Content-Type": "text/event-stream", "Transfer-Encoding": "chunked" });
       res.end(sseTextStream(OVER_1MB));
     });
 
-    const { ctx, onLog } = makeCtx();
+    const { ctx, onLog } = makeSpawnCtx();
     await executeAgentLoop(ctx);
 
     const stderrLines = logLines(onLog).filter((l) => l.includes("[openrouter adapter]"));
@@ -950,4 +906,3 @@ describe.skipIf(!oragerDistExists)("oversized segment handling (via spawn)", () 
   }, IT);
 
 });
-

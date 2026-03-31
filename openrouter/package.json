@@ -19,8 +19,10 @@
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
     "pretest": "bash scripts/test-lock.sh acquire",
-    "test": "vitest run",
+    "test": "vitest run --exclude 'tests/integration/**'",
     "posttest": "bash scripts/test-lock.sh release",
+    "test:integration": "vitest run tests/integration/",
+    "test:all": "vitest run",
     "check-dist": "npm run build && git diff --exit-code dist/ || (echo 'ERROR: dist/ is stale — run npm run build and commit the result' && exit 1)"
   },
   "dependencies": {

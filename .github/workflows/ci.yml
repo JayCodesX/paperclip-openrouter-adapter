@@ -30,9 +30,14 @@ jobs:
         working-directory: openrouter
         run: npm run typecheck
 
-      - name: Test
+      - name: Unit tests
         working-directory: openrouter
         run: npm test
+
+      - name: Integration tests
+        working-directory: openrouter
+        run: npm run test:integration
+        timeout-minutes: 5
 
       - name: Check dist is up to date
         working-directory: openrouter
