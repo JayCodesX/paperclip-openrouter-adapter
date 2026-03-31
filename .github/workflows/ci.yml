@@ -13,8 +13,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout adapter
         uses: actions/checkout@v4
+
+      - name: Checkout orager
+        uses: actions/checkout@v4
+        with:
+          repository: JayCodesX/orager
+          path: ../orager
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -23,9 +29,13 @@ jobs:
           cache: "npm"
           cache-dependency-path: openrouter/package-lock.json
 
-      - name: Install dependencies
+      - name: Install adapter dependencies
         working-directory: openrouter
         run: npm ci
+
+      - name: Install and build orager
+        working-directory: ../orager
+        run: npm ci && npm run build
 
       - name: Typecheck
         working-directory: openrouter
