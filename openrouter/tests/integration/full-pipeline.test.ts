@@ -481,16 +481,6 @@ describe.skipIf(!oragerDistExists)("full pipeline — spawn path", () => {
     expect(mockServer.completionCalls).toHaveLength(0);
   }, IT);
 
-  it("requiredEnvVars: missing var fails before any OpenRouter call", async () => {
-    const { ctx } = makeCtx({
-      config: { requiredEnvVars: ["INTEG_TEST_DEFINITELY_NOT_SET_XYZ"] },
-    });
-    const result = await executeAgentLoop(ctx);
-
-    expect(result.exitCode).toBe(1);
-    expect(mockServer.completionCalls).toHaveLength(0);
-  }, IT);
-
   it("wakeReasonModels: override model sent when wake reason matches", async () => {
     mockServer.queueText("Done.");
 
@@ -737,18 +727,6 @@ describe.skipIf(!oragerDistExists)("cost anomaly detection", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe.skipIf(!oragerDistExists)("orager-level features (via spawn)", () => {
-
-  it("requiredEnvVars validated inside orager (spawn path belt-and-suspenders)", async () => {
-    // The adapter checks requiredEnvVars before spawning.
-    // This test verifies the check fires for the spawn path specifically.
-    const { ctx } = makeCtx({
-      config: { requiredEnvVars: ["ORAGER_INTEG_MISSING_VAR_99XYZ"] },
-    });
-    const result = await executeAgentLoop(ctx);
-
-    expect(result.exitCode).toBe(1);
-    expect(mockServer.completionCalls).toHaveLength(0);
-  }, IT);
 
   it("parallel_tool_calls flag forwarded to OpenRouter request", async () => {
     mockServer.queueText("Done.");

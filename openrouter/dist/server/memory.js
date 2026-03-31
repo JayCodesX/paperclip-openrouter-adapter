@@ -88,8 +88,11 @@ export function removeMemoryEntry(store, id) {
 // ── Maintenance ───────────────────────────────────────────────────────────────
 /** Prunes expired entries. Immutable — returns a new store. */
 export function pruneExpired(store) {
-    const now = new Date().toISOString();
-    const entries = store.entries.filter((e) => !e.expiresAt || e.expiresAt > now);
+    // N-11: Compare timestamps numerically instead of lexicographically.
+    // ISO 8601 strings with different timezone offset formats (+00:00 vs Z)
+    // produce incorrect results with string comparison.
+    const nowMs = Date.now();
+    const entries = store.entries.filter((e) => !e.expiresAt || new Date(e.expiresAt).getTime() > nowMs);
     if (entries.length === store.entries.length)
         return store;
     return { ...store, entries, updatedAt: new Date().toISOString() };

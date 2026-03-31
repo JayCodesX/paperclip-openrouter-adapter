@@ -1,6 +1,5 @@
 /**
  * Tests for the orager-feature additions surfaced in Sprint 9:
- *   - onlineSearch: :online suffix appended to model in config file
  *   - agentId override: config.agentId used as JWT subject and memoryKey
  *   - processRateLimitTracker: updated on daemon 429, cleared on success
  *
@@ -20,34 +19,7 @@ import {
   processRateLimitTracker,
 } from "../src/server/execute-cli.js";
 
-// ── shared fake binary ────────────────────────────────────────────────────────
-// Reads --config-file from argv, echoes its JSON to stderr, then succeeds.
-
-const RESULT_JSON =
-  '{"type":"result","subtype":"success","session_id":"feat-test-session","is_error":false,' +
-  '"total_cost_usd":0.001,"usage":{"input_tokens":10,"output_tokens":5,' +
-  '"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"result":"done"}';
-
-async function createFakeBinary(dir: string): Promise<string> {
-  const binPath = path.join(dir, "fake-orager");
-  const script = [
-    "#!/bin/sh",
-    "config_file=''",
-    "while [ $# -gt 0 ]; do",
-    "  if [ \"$1\" = \"--config-file\" ]; then",
-    "    config_file=\"$2\"; shift 2",
-    "  else shift; fi",
-    "done",
-    "if [ -n \"$config_file\" ] && [ -f \"$config_file\" ]; then",
-    "  printf 'CONFIG_FILE: %s\\n' \"$(cat \"$config_file\")\" >&2",
-    "fi",
-    "cat > /dev/null",
-    `printf '%s\\n' '${RESULT_JSON}'`,
-    "exit 0",
-  ].join("\n");
-  await fs.writeFile(binPath, script, { mode: 0o755 });
-  return binPath;
-}
+// ── shared helpers ────────────────────────────────────────────────────────────
 
 function makeCtx(configOverrides: Record<string, unknown> = {}) {
   return {
@@ -61,88 +33,19 @@ function makeCtx(configOverrides: Record<string, unknown> = {}) {
   };
 }
 
-function stderrOutput(ctx: ReturnType<typeof makeCtx>): string {
-  return (ctx.onLog as ReturnType<typeof vi.fn>).mock.calls
-    .filter(([s]: [string]) => s === "stderr")
-    .map(([, m]: [string, string]) => m)
-    .join("");
-}
-
-function parseConfigFromStderr(output: string): Record<string, unknown> | null {
-  const match = output.match(/CONFIG_FILE: (\{.*\})/);
-  if (!match) return null;
-  try { return JSON.parse(match[1]) as Record<string, unknown>; }
-  catch { return null; }
-}
-
 let tmpDir: string;
-let fakeBin: string;
 
 beforeEach(async () => {
   _resetStateForTesting();
   processRateLimitTracker.clearRateLimit();
   const raw = await fs.mkdtemp(path.join(os.tmpdir(), "orager-feat-test-"));
   tmpDir = await fs.realpath(raw);
-  fakeBin = await createFakeBinary(tmpDir);
 });
 
 afterEach(async () => {
   vi.restoreAllMocks();
   processRateLimitTracker.clearRateLimit();
   await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-});
-
-// ── onlineSearch ──────────────────────────────────────────────────────────────
-
-describe("onlineSearch — :online suffix in spawn path", () => {
-  it("appends :online to model when onlineSearch: true and no suffix present", async () => {
-    const ctx = makeCtx({ onlineSearch: true, cliPath: fakeBin, cwd: tmpDir });
-    await executeAgentLoop(ctx);
-    const cfg = parseConfigFromStderr(stderrOutput(ctx));
-    expect(cfg).not.toBeNull();
-    expect(cfg!.model).toBe("openai/gpt-4o-mini:online");
-  });
-
-  it("does NOT append :online when model already has a variant suffix", async () => {
-    const ctx = makeCtx({
-      model: "openai/gpt-4o-mini:nitro",
-      onlineSearch: true,
-      cliPath: fakeBin,
-      cwd: tmpDir,
-    });
-    await executeAgentLoop(ctx);
-    const cfg = parseConfigFromStderr(stderrOutput(ctx));
-    expect(cfg).not.toBeNull();
-    expect(cfg!.model).toBe("openai/gpt-4o-mini:nitro");
-  });
-
-  it("does NOT append :online when onlineSearch: false", async () => {
-    const ctx = makeCtx({ onlineSearch: false, cliPath: fakeBin, cwd: tmpDir });
-    await executeAgentLoop(ctx);
-    const cfg = parseConfigFromStderr(stderrOutput(ctx));
-    expect(cfg).not.toBeNull();
-    expect(cfg!.model).toBe("openai/gpt-4o-mini");
-  });
-
-  it("does NOT modify model when onlineSearch is absent", async () => {
-    const ctx = makeCtx({ cliPath: fakeBin, cwd: tmpDir });
-    await executeAgentLoop(ctx);
-    const cfg = parseConfigFromStderr(stderrOutput(ctx));
-    expect(cfg).not.toBeNull();
-    expect(cfg!.model).toBe("openai/gpt-4o-mini");
-  });
-
-  it("appends :online even when a :free suffix would be overridden — only skips when already suffixed", async () => {
-    const ctx = makeCtx({
-      model: "deepseek/deepseek-chat",
-      onlineSearch: true,
-      cliPath: fakeBin,
-      cwd: tmpDir,
-    });
-    await executeAgentLoop(ctx);
-    const cfg = parseConfigFromStderr(stderrOutput(ctx));
-    expect(cfg!.model).toBe("deepseek/deepseek-chat:online");
-  });
 });
 
 // ── agentId override ──────────────────────────────────────────────────────────

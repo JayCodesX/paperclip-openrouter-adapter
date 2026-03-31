@@ -160,16 +160,9 @@ describe("M-27: Config file uses user-private directory", () => {
   });
 });
 
-// ── M-18: Module-level network request made lazy ────────────────────────────
-
-describe("M-18: Vision cache pre-warm is lazy", () => {
-  it("source has named function instead of module-level IIFE", async () => {
-    const source = await fs.readFile(EXECUTE_CLI_PATH, "utf8");
-    expect(source).toContain("M-18");
-    expect(source).toContain("_ensureVisionCacheWarmed");
-    expect(source).toContain("_visionPrewarmDone");
-  });
-});
+// ── M-18: Vision cache pre-warm removed ──────────────────────────────────────
+// Vision routing is now handled entirely by orager — the adapter no longer
+// maintains its own vision cache or pre-warm logic.
 
 // ── M-19: Process kill fallback wrapped in try/catch ────────────────────────
 

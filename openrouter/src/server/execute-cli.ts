@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import os from "node:os";
 import crypto from "node:crypto";
 import { mintDaemonJwt } from "./jwt-utils.js";
-import { getModelFromLiveCache, _resetModelCacheForTesting } from "./list-models.js";
+import { _resetModelCacheForTesting } from "./list-models.js";
 import { processRateLimitTracker } from "../rate-limit-tracker.js";
 import { buildOragerSkillsDir, cleanupOragerSkillsDir } from "./skills.js";
 
@@ -72,148 +72,6 @@ function structuredLog(entry: StructuredLogEntry): void {
   try {
     appendFileSync(STRUCTURED_LOG_FILE, JSON.stringify({ ...entry, ts: entry.ts }) + "\n");
   } catch { /* never fail a run due to log write error */ }
-}
-
-// ── Cost anomaly detection ────────────────────────────────────────────────────
-// Module-level rolling window shared across all runs in this process.
-// Resets on process restart. Zero-cost runs (dry-run, free-tier) are excluded.
-const COST_WINDOW_SIZE = 20;
-// Minimum number of runs between anomaly alerts to prevent flooding onMeta/stderr
-// in batch workloads where every run is anomalous.
-const COST_ANOMALY_COOLDOWN_RUNS = 10;
-const _costWindow: number[] = [];
-let _runsSinceLastAnomaly = COST_ANOMALY_COOLDOWN_RUNS; // start ready to fire
-
-function recordRunCost(costUsd: number): void {
-  if (costUsd <= 0) return;
-  _costWindow.push(costUsd);
-  if (_costWindow.length > COST_WINDOW_SIZE) _costWindow.shift();
-  _runsSinceLastAnomaly++;
-}
-
-function checkCostAnomaly(
-  costUsd: number,
-  agentId: string,
-  runId: string,
-  onLog: (stream: "stdout" | "stderr", line: string) => Promise<void> | void,
-): void {
-  if (_costWindow.length < 3) return;
-  if (_runsSinceLastAnomaly < COST_ANOMALY_COOLDOWN_RUNS) return; // cooldown active
-  const avg = _costWindow.reduce((a, b) => a + b, 0) / _costWindow.length;
-  if (avg > 0 && costUsd > avg * 2) {
-    const multiplier = (costUsd / avg).toFixed(1);
-    const msg =
-      `[openrouter adapter] COST ANOMALY: run cost $${costUsd.toFixed(4)} is ` +
-      `>${multiplier}x the rolling average ($${avg.toFixed(4)}, window=${_costWindow.length} runs)\n`;
-    void onLog("stderr", msg);
-    structuredLog({
-      level: "warn",
-      ts: Date.now(),
-      event: "cost_anomaly",
-      agentId,
-      runId,
-      costUsd,
-      rollingAvgCostUsd: avg,
-      windowSize: _costWindow.length,
-    });
-    _runsSinceLastAnomaly = 0; // reset cooldown
-  }
-}
-
-// ── Memory key ────────────────────────────────────────────────────────────────
-// Computes the key used to namespace orager's memory store.  When a workspace
-// repo URL is available the key includes a filesystem-safe slug derived from
-// the URL so that separate repos don't share memory.
-
-/** Convert a repo URL into a short filesystem-safe slug. */
-function repoSlug(repoUrl: string): string {
-  // Strip scheme (e.g. "https://") then replace non-alphanumeric characters
-  // with underscores, collapse repeated underscores, trim leading/trailing
-  // underscores and truncate to 64 characters.
-  return repoUrl
-    .replace(/^[a-zA-Z][a-zA-Z0-9+\-.]*:\/\//, "")  // strip scheme://
-    .replace(/[^a-zA-Z0-9_]/g, "_")                  // non-safe chars → _
-    .replace(/_+/g, "_")                              // collapse repeats
-    .replace(/^_+|_+$/g, "")                          // trim edges
-    .slice(0, 64);
-}
-
-/**
- * Build the memory key for orager.
- *
- * - Falls back to `agentId` alone when `repoUrl` is null or empty.
- * - Otherwise returns `${agentId}_${repoSlug(repoUrl)}` truncated to 128 chars.
- */
-export function buildMemoryKey(agentId: string, repoUrl: string | null): string {
-  if (!repoUrl) return agentId;
-  const slug = repoSlug(repoUrl);
-  if (!slug) return agentId;
-  return `${agentId}_${slug}`.slice(0, 128);
-}
-
-// ── Vision support check ──────────────────────────────────────────────────────
-// Fetches OpenRouter /api/v1/models to verify the selected model reports
-// "image" in its input_modalities before sending image_url content blocks.
-// require_parameters: true (the default) filters providers that don't declare
-// vision support, but doesn't guarantee the model itself supports it — this
-// check makes the gap explicit with a structured warning.
-//
-// Returns:
-//   true  — model confirmed to support image inputs
-//   false — model confirmed NOT to support image inputs (warn loudly)
-//   null  — model not found in /models response or fetch failed (warn softly)
-//
-// Results are cached per model ID for 6 hours to avoid adding per-run latency.
-
-const _visionCache = new Map<string, { supported: boolean | null; ts: number }>();
-export const VISION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-// Keep the old internal name as an alias so nothing inside the module needs updating
-const _VISION_CACHE_TTL_MS = VISION_CACHE_TTL_MS;
-
-export async function checkVisionSupport(apiKey: string, model: string): Promise<boolean | null> {
-  const cached = _visionCache.get(model);
-  if (cached && Date.now() - cached.ts < _VISION_CACHE_TTL_MS) return cached.supported;
-
-  // Prefer the shared model list when it's already in memory — avoids a redundant
-  // fetch on every run. The list is populated by listOpenRouterModels() (e.g. called
-  // by the UI model dropdown), so no additional network call is needed here.
-  const liveEntry = getModelFromLiveCache(model);
-  if (liveEntry !== undefined) {
-    _visionCache.set(model, { supported: liveEntry.supportsVision, ts: Date.now() });
-    return liveEntry.supportsVision;
-  }
-
-  const base = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/$/, "");
-  try {
-    const res = await fetch(`${base}/models`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (!res.ok) {
-      _visionCache.set(model, { supported: null, ts: Date.now() });
-      return null;
-    }
-    const json = await res.json() as {
-      data?: Array<{
-        id: string;
-        input_modalities?: string[];
-        architecture?: { input_modalities?: string[] };
-      }>;
-    };
-    const entry = (json.data ?? []).find((m) => m.id === model);
-    if (!entry) {
-      _visionCache.set(model, { supported: null, ts: Date.now() });
-      return null;
-    }
-    const modalities =
-      entry.input_modalities ?? entry.architecture?.input_modalities ?? [];
-    const supported = modalities.includes("image");
-    _visionCache.set(model, { supported, ts: Date.now() });
-    return supported;
-  } catch {
-    _visionCache.set(model, { supported: null, ts: Date.now() });
-    return null;
-  }
 }
 
 // ── API key pool ──────────────────────────────────────────────────────────────
@@ -657,19 +515,6 @@ function ensurePathInEnv(env: Record<string, string>): Record<string, string> {
   return { ...env, PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin" };
 }
 
-/**
- * Check that all required environment variable names are present and non-empty.
- * Returns an array of missing variable names.
- */
-function checkRequiredEnvVars(
-  required: unknown,
-  env: Record<string, string>,
-): string[] {
-  if (!Array.isArray(required)) return [];
-  return required.filter(
-    (v): v is string => typeof v === "string" && v.trim().length > 0 && !env[v.trim()],
-  );
-}
 
 /**
  * Options sent to the orager daemon via POST /run.
@@ -787,7 +632,6 @@ async function executeViaDaemon(
   daemonOpts: DaemonRunOpts,
   timeoutSec: number,
   onLog: (stream: "stdout" | "stderr", line: string) => Promise<void> | void,
-  maxCostUsdSoft?: number,
 ): Promise<AdapterExecutionResult | null> {
   const token = mintDaemonJwt(signingKey, agentId);
   const tokenMintedAt = Date.now();
@@ -1084,15 +928,6 @@ async function executeViaDaemon(
     signal: null,
   });
 
-  const daemonCostUsd = builtResult.costUsd ?? 0;
-  if (maxCostUsdSoft !== undefined && daemonCostUsd >= maxCostUsdSoft) {
-    structuredLog({ level: "warn", ts: Date.now(), event: "soft_cost_limit", agentId, runId, costUsd: daemonCostUsd, message: `Run cost $${daemonCostUsd.toFixed(4)} exceeded soft limit $${maxCostUsdSoft}` });
-    void onLog(
-      "stderr",
-      `[openrouter adapter] soft cost limit reached ($${daemonCostUsd.toFixed(4)} >= $${maxCostUsdSoft}) — consider adjusting maxCostUsd\n`,
-    );
-  }
-
   return {
     ...builtResult,
     question: questionEvent
@@ -1259,8 +1094,6 @@ export async function executeAgentLoop(
   const { runId, agent, runtime, config, context, onLog, onMeta, authToken } =
     ctx;
 
-  void _ensureVisionCacheWarmed();
-
   // ── Config ─────────────────────────────────────────────────────────────────
   // Support both cliPath and the generic "command" field from the Paperclip UI
   const cliPath = asString(config.cliPath ?? config.command, DEFAULT_CLI);
@@ -1294,14 +1127,7 @@ export async function executeAgentLoop(
     });
   }
 
-  // ── onlineSearch — append :online suffix for web-search-enabled runs ────────
-  // When onlineSearch is true and the model has no existing variant suffix
-  // (:online, :nitro, :thinking, etc.) the suffix is appended so OpenRouter
-  // routes to a web-search-capable provider variant.
   const onlineSearch = asBoolean(config.onlineSearch, false);
-  if (onlineSearch && !effectiveModel.includes(":")) {
-    effectiveModel = `${effectiveModel}:online`;
-  }
 
   // ── agentId override — caller-supplied identity for Anthropic metadata ──────
   // When config.agentId is provided it overrides agent.id as the identity sent
@@ -1434,12 +1260,6 @@ export async function executeAgentLoop(
           typeof m === "string" && (m as string).trim().length > 0,
       )
     : [];
-
-  // Apply :online to fallback models too — otherwise web-search silently
-  // disables the moment orager rotates to a fallback on API error. (audit F2/H4)
-  const effectiveModels = onlineSearch
-    ? models.map((m) => (m.includes(":") ? m : `${m}:online`))
-    : models;
 
   // Transforms
   const transforms = Array.isArray(config.transforms)
@@ -1996,8 +1816,8 @@ export async function executeAgentLoop(
     if (quantizations) obj.quantizations = quantizations.split(",").filter(Boolean);
     if (preset) obj.preset = preset;
 
-    // Fallback models (with :online suffix already applied if onlineSearch is set)
-    if (effectiveModels.length > 0) obj.models = effectiveModels;
+    // Fallback models (orager applies :online suffix when onlineSearch is set)
+    if (models.length > 0) obj.models = models;
 
     // Transforms
     if (transforms) obj.transforms = transforms.split(",").filter(Boolean);
@@ -2062,7 +1882,7 @@ export async function executeAgentLoop(
     // Required env vars — pass through so orager also validates (belt-and-suspenders
     // for the spawn path; adapter-level check above handles daemon path).
     if (requiredEnvVars.length > 0) obj.requiredEnvVars = requiredEnvVars;
-    obj.memoryKey = buildMemoryKey(effectiveAgentId, workspaceRepoUrl);
+    if (workspaceRepoUrl) obj.repoUrl = workspaceRepoUrl;
 
     // Per-agent API key isolation
     const _agentApiKey = asString(config.agentApiKey, "");
@@ -2270,21 +2090,6 @@ export async function executeAgentLoop(
   // Merge with process.env and ensure PATH is populated
   const effectiveEnv = ensurePathInEnv({ ...(process.env as Record<string, string>), ...env });
 
-  // ── Per-agent environment validation ────────────────────────────────────────
-  const missingVars = checkRequiredEnvVars(requiredEnvVars, effectiveEnv);
-  if (missingVars.length > 0) {
-    structuredLog({ level: "error", ts: Date.now(), event: "env_var_missing", agentId: agent.id, runId, message: `Missing: ${missingVars.join(", ")}` });
-    // Clean up the config file — orager will never run to delete it for us
-    if (configFileWritten) await fs.unlink(configFilePath).catch(() => {}); if (ephemeralSkillsDir) await cleanupOragerSkillsDir(ephemeralSkillsDir.dir);
-    return {
-      exitCode: 1,
-      signal: null,
-      timedOut: false,
-      errorMessage: `Missing required environment variables: ${missingVars.join(", ")}`,
-      errorCode: "config_error",
-    };
-  }
-
   // ── Dry-run mode ────────────────────────────────────────────────────────────
   if (dryRun) {
     // Clean up the config file written above — no subprocess will delete it for us
@@ -2386,7 +2191,7 @@ export async function executeAgentLoop(
         return {
           apiKey,
           model: effectiveModel,
-          models: effectiveModels.length > 0 ? effectiveModels : undefined,
+          models: models.length > 0 ? models : undefined,
           sessionId: previousSessionId || null,
           addDirs,
           maxTurns: maxTurns > 0 ? maxTurns : 0,
@@ -2469,7 +2274,7 @@ export async function executeAgentLoop(
           ...(apiKeyPool.length > 1 ? { apiKeys: apiKeyPool } : {}),
           ...(requiredEnvVars.length > 0 ? { requiredEnvVars } : {}),
           ...(asString(config.agentApiKey, "").trim() ? { agentApiKey: asString(config.agentApiKey, "").trim() } : {}),
-          memoryKey: buildMemoryKey(effectiveAgentId, workspaceRepoUrl),
+          ...(workspaceRepoUrl ? { repoUrl: workspaceRepoUrl } : {}),
           ...(["embedding", "fts", "local"].includes(asString(config.memoryRetrieval, ""))
             ? {
                 memoryRetrieval: asString(config.memoryRetrieval, "") as "embedding" | "fts" | "local",
@@ -2494,7 +2299,6 @@ export async function executeAgentLoop(
         daemonOpts,
         timeoutSec,
         onLog,
-        maxCostUsdSoft,
       );
       if (daemonResult !== null) {
         structuredLog({
@@ -2528,11 +2332,6 @@ export async function executeAgentLoop(
             ...(workspaceRepoUrl ? { repoUrl: workspaceRepoUrl } : {}),
             ...(workspaceRepoRef ? { repoRef: workspaceRepoRef } : {}),
           };
-        }
-        // Cost anomaly detection
-        if (typeof daemonResult.costUsd === "number") {
-          recordRunCost(daemonResult.costUsd);
-          checkCostAnomaly(daemonResult.costUsd, agent.id, runId, onLog);
         }
         return daemonResult;
       }
@@ -2818,15 +2617,6 @@ export async function executeAgentLoop(
         signal: null,
       });
 
-      const spawnCostUsd = spawnResult.costUsd ?? 0;
-      if (maxCostUsdSoft !== undefined && spawnCostUsd >= maxCostUsdSoft) {
-        structuredLog({ level: "warn", ts: Date.now(), event: "soft_cost_limit", agentId: agent.id, runId, costUsd: spawnCostUsd, message: `Run cost $${spawnCostUsd.toFixed(4)} exceeded soft limit $${maxCostUsdSoft}` });
-        void onLog(
-          "stderr",
-          `[openrouter adapter] soft cost limit reached ($${spawnCostUsd.toFixed(4)} >= $${maxCostUsdSoft}) — consider adjusting maxCostUsd\n`,
-        );
-      }
-
       // Apply question event
       const finalResult: AdapterExecutionResult = {
         ...spawnResult,
@@ -2849,13 +2639,10 @@ export async function executeAgentLoop(
         cachedInputTokens: spawnResult.usage?.cachedInputTokens,
         cacheWriteInputTokens: typeof spawnResult.resultJson?.cacheWriteInputTokens === "number" ? spawnResult.resultJson.cacheWriteInputTokens : undefined,
         cacheHitRatio: typeof spawnResult.resultJson?.cacheHitRatio === "number" ? spawnResult.resultJson.cacheHitRatio : undefined,
-        costUsd: spawnCostUsd,
+        costUsd: spawnResult.costUsd ?? 0,
         turnCount: typeof spawnResult.resultJson?.turnCount === "number" ? spawnResult.resultJson.turnCount : undefined,
         subtype: typeof spawnResult.resultJson?.subtype === "string" ? spawnResult.resultJson.subtype : undefined,
       });
-      // Cost anomaly detection
-      recordRunCost(spawnCostUsd);
-      checkCostAnomaly(spawnCostUsd, agent.id, runId, onLog);
       // Clean up ephemeral skills dir now that the run is complete
       if (ephemeralSkillsDir) void cleanupOragerSkillsDir(ephemeralSkillsDir.dir);
       settle(finalResult);
@@ -2884,15 +2671,11 @@ export async function executeAgentLoop(
 
 // ── Test helpers (exported for unit tests only) ───────────────────────────────
 export function _resetStateForTesting(): void {
-  _costWindow.length = 0;
-  _runsSinceLastAnomaly = COST_ANOMALY_COOLDOWN_RUNS; // reset cooldown to "ready"
-  _visionCache.clear();
   _daemonCircuitState.clear();
   _lastAutoStartAttemptMs = 0;
   _structuredLogBuffer.clear();
   _skillsDirChecked = false;
   _skillsDirValid = false;
-  _visionPrewarmDone = false;
   _resetModelCacheForTesting();
 }
 
@@ -2904,8 +2687,6 @@ export function _drainStructuredLogForTesting(): StructuredLogEntry[] {
 }
 export {
   buildApiKeyPool,
-  recordRunCost,
-  checkCostAnomaly,
   DEFAULT_MODEL,
   DAEMON_KEY_PATH,
   DAEMON_KEY_MAX_AGE_MS,
@@ -2918,33 +2699,5 @@ export {
   processRateLimitTracker,
   _lastAutoStartAttemptMs,
   AUTO_START_COOLDOWN_MS,
-  COST_ANOMALY_COOLDOWN_RUNS,
 };
 
-// M-18: Vision cache pre-warm is now lazy — triggered on first executeAgentLoop
-// call instead of firing a network request on every module import.
-let _visionPrewarmDone = false;
-async function _ensureVisionCacheWarmed(): Promise<void> {
-  if (_visionPrewarmDone) return;
-  _visionPrewarmDone = true;
-  const apiKey = process.env.OPENROUTER_API_KEY ?? "";
-  if (!apiKey) return;
-  const base = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/$/, "");
-  try {
-    const res = await fetch(`${base}/models`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!res.ok) return;
-    const json = await res.json() as {
-      data?: Array<{ id: string; input_modalities?: string[]; architecture?: { input_modalities?: string[] } }>;
-    };
-    for (const entry of json.data ?? []) {
-      const modalities = entry.input_modalities ?? entry.architecture?.input_modalities ?? [];
-      const supported = modalities.includes("image");
-      _visionCache.set(entry.id, { supported, ts: Date.now() });
-    }
-  } catch {
-    // Never fail a run due to a pre-warm error
-  }
-}

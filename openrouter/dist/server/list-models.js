@@ -3,6 +3,7 @@ const OPENROUTER_MODELS_ENDPOINT = "https://openrouter.ai/api/v1/models";
 const TIMEOUT_MS = 5000;
 const CACHE_TTL_MS = 5 * 60_000; // 5 minutes — aligns with execute-cli.ts vision cache TTL
 let cached = null;
+let _fetchInFlight = null;
 async function fetchModels() {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
@@ -43,7 +44,12 @@ export async function listOpenRouterModels() {
     const now = Date.now();
     if (cached && cached.expiresAt > now)
         return cached.models;
-    const fetched = await fetchModels();
+    // L-11: Deduplicate concurrent expired-cache fetches — return the
+    // in-flight promise if another caller already started a fetch.
+    if (_fetchInFlight)
+        return _fetchInFlight;
+    _fetchInFlight = fetchModels().finally(() => { _fetchInFlight = null; });
+    const fetched = await _fetchInFlight;
     if (fetched.length > 0) {
         cached = { expiresAt: now + CACHE_TTL_MS, models: fetched };
         return fetched;
@@ -54,8 +60,6 @@ export async function listOpenRouterModels() {
     return fallbackModels;
 }
 // Synchronous read of the live cache — no fetch triggered.
-// Used by checkVisionSupport to avoid a redundant network call when the shared
-// list is already warm (populated by a prior listOpenRouterModels call).
 // Returns undefined if the cache is cold or expired.
 export function getModelFromLiveCache(model) {
     const now = Date.now();
@@ -65,5 +69,6 @@ export function getModelFromLiveCache(model) {
 }
 export function _resetModelCacheForTesting() {
     cached = null;
+    _fetchInFlight = null;
 }
 //# sourceMappingURL=list-models.js.map

