@@ -2040,7 +2040,8 @@ export async function executeAgentLoop(ctx) {
             // Wrap the spawn in a shell with ulimit to cap memory and CPU time.
             // Configurable via ORAGER_CLI_MEM_LIMIT_KB (default 4GB) and
             // ORAGER_CLI_CPU_LIMIT_SECS (default unlimited = 0).
-            const memLimitKb = parseInt(process.env["ORAGER_CLI_MEM_LIMIT_KB"] ?? "", 10) || 4 * 1024 * 1024;
+            const _rawMemLimit = process.env["ORAGER_CLI_MEM_LIMIT_KB"];
+            const memLimitKb = _rawMemLimit !== undefined ? parseInt(_rawMemLimit, 10) : 4 * 1024 * 1024;
             const cpuLimitSecs = parseInt(process.env["ORAGER_CLI_CPU_LIMIT_SECS"] ?? "", 10) || 0;
             const platform = process.platform;
             let spawnCmd;

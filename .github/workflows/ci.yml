@@ -51,6 +51,7 @@ jobs:
         timeout-minutes: 5
         env:
           ORAGER_DIST: ${{ github.workspace }}/orager/dist/index.js
+          ORAGER_CLI_MEM_LIMIT_KB: "0"
 
       - name: Check dist is up to date
         working-directory: openrouter

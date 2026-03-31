@@ -798,18 +798,8 @@ describe.skipIf(!oragerDistExists)("full pipeline — spawn path", () => {
   it("simple text response: exitCode 0 and completion request made", async () => {
     mockServer.queueText("Integration test complete.");
 
-    const { ctx, onLog } = makeSpawnCtx();
+    const { ctx } = makeSpawnCtx();
     const result = await executeAgentLoop(ctx);
-
-    if (result.exitCode !== 0) {
-      console.error("[SPAWN DEBUG]", JSON.stringify({
-        exitCode: result.exitCode,
-        errorCode: result.errorCode,
-        errorMessage: result.errorMessage,
-        timedOut: result.timedOut,
-      }));
-      console.error("[SPAWN LOGS]", logLines(onLog).join("\n"));
-    }
 
     expect(result.exitCode).toBe(0);
     expect(mockServer.completionCalls).toHaveLength(1);
