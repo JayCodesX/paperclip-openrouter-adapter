@@ -2523,7 +2523,26 @@ export async function executeAgentLoop(
     }
     let proc: ReturnType<typeof spawn>;
     try {
-      proc = spawn(cliPath, args, {
+      // ── OS resource limits (audit N-01) ─────────────────────────────────
+      // Wrap the spawn in a shell with ulimit to cap memory and CPU time.
+      // Configurable via ORAGER_CLI_MEM_LIMIT_KB (default 4GB) and
+      // ORAGER_CLI_CPU_LIMIT_SECS (default unlimited = 0).
+      const memLimitKb = parseInt(process.env["ORAGER_CLI_MEM_LIMIT_KB"] ?? "", 10) || 4 * 1024 * 1024;
+      const cpuLimitSecs = parseInt(process.env["ORAGER_CLI_CPU_LIMIT_SECS"] ?? "", 10) || 0;
+      const platform = process.platform;
+      let spawnCmd: string;
+      let spawnArgs: string[];
+      if (platform === "darwin" || platform === "linux") {
+        const ulimits = [`ulimit -v ${memLimitKb}`];
+        if (cpuLimitSecs > 0) ulimits.push(`ulimit -t ${cpuLimitSecs}`);
+        const quotedArgs = args.map((a: string) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
+        spawnCmd = "bash";
+        spawnArgs = ["-c", `${ulimits.join(" && ")} && exec ${cliPath} ${quotedArgs}`];
+      } else {
+        spawnCmd = cliPath;
+        spawnArgs = args;
+      }
+      proc = spawn(spawnCmd, spawnArgs, {
         cwd,
         env: effectiveEnv,
         stdio: ["pipe", "pipe", "pipe"],
@@ -2605,8 +2624,26 @@ export async function executeAgentLoop(
     // Read stdout line by line and stream to Paperclip.
     // Cap the in-memory buffer to prevent OOM from runaway binary output.
     const MAX_STDOUT_BUFFER_BYTES = 1 * 1024 * 1024; // 1 MB per partial line
+    // Total response body cap (audit N-02) — abort if response exceeds limit.
+    const MAX_TOTAL_RESPONSE_BYTES = parseInt(process.env["ORAGER_MAX_RESPONSE_BYTES"] ?? "", 10) || 50 * 1024 * 1024;
+    let totalResponseBytes = 0;
+    let responseTruncated = false;
     let stdoutBuffer = "";
     proc.stdout?.on("data", (chunk: Buffer | string) => {
+      const chunkLen = typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.length;
+      totalResponseBytes += chunkLen;
+      if (totalResponseBytes > MAX_TOTAL_RESPONSE_BYTES && !responseTruncated) {
+        responseTruncated = true;
+        void onLog("stderr",
+          `[openrouter adapter] response exceeded ${MAX_TOTAL_RESPONSE_BYTES} bytes — killing process\n`
+        );
+        try {
+          if (proc.pid != null) process.kill(-proc.pid, "SIGTERM");
+          else proc.kill("SIGTERM");
+        } catch { proc.kill("SIGTERM"); }
+        return;
+      }
+      if (responseTruncated) return;
       stdoutBuffer +=
         typeof chunk === "string" ? chunk : chunk.toString("utf8");
       if (stdoutBuffer.length > MAX_STDOUT_BUFFER_BYTES) {
