@@ -695,6 +695,8 @@ interface DaemonRunOpts {
   summarizeKeepRecentTurns?: number;
   summarizePrompt?: string;
   summarizeFallbackKeep?: number;
+  // ── Vision routing ──────────────────────────────────────────────────────
+  visionModel?: string;
   // ── Plan mode ───────────────────────────────────────────────────────────
   planMode?: boolean;
   // ── Context ─────────────────────────────────────────────────────────────
@@ -1856,93 +1858,14 @@ export async function executeAgentLoop(
         ]
       : null;
 
-  // ── Vision capability check ───────────────────────────────────────────────
-  // When the run carries image attachments, verify the selected model actually
-  // reports image support via OpenRouter before writing config or hitting the
-  // daemon. require_parameters: true (the default) will filter providers that
-  // don't declare vision support, but the model-level check is a separate
-  // question — not all providers expose vision for every model even when the
-  // base weights support it.
-  let visionFallbackNote: string | null = null;
-  if (promptContent !== null) {
-    const visionOk = await checkVisionSupport(apiKey, effectiveModel);
-    if (visionOk === false) {
-      // Model confirmed to not support vision. Try the fallback chain.
-      // visionFallbackModels controls the candidates:
-      //   • undefined/omitted → use DEFAULT_VISION_FALLBACK_MODELS
-      //   • []                → DISABLES fallback entirely (images sent as-is)
-      //   • ["model/id", …]   → use the provided list instead of the default
-      // Default chain: Gemini 2.0 Flash → GPT-4o → Claude Sonnet — all
-      // confirmed vision-capable on OpenRouter and ordered by cost/speed.
-      const fallbackExplicitlyDisabled =
-        Array.isArray(config.visionFallbackModels) &&
-        (config.visionFallbackModels as unknown[]).length === 0;
-      const fallbackCandidates: string[] = Array.isArray(config.visionFallbackModels)
-        ? (config.visionFallbackModels as unknown[]).filter(
-            (m): m is string => typeof m === "string" && m.trim().length > 0,
-          )
-        : DEFAULT_VISION_FALLBACK_MODELS;
-
-      let fallbackModel: string | null = null;
-      for (const candidate of fallbackCandidates) {
-        if (candidate === effectiveModel) continue; // skip — already failed
-        const candidateOk = await checkVisionSupport(apiKey, candidate);
-        if (candidateOk === true) {
-          fallbackModel = candidate;
-          break;
-        }
-      }
-
-      if (fallbackModel) {
-        const originalModel = effectiveModel;
-        effectiveModel = fallbackModel;
-        visionFallbackNote = `vision fallback: ${originalModel} → ${fallbackModel}`;
-        // Recompute timeout for the new model (only matters when not explicitly set).
-        timeoutSec = Math.max(0, safeNumber(config.timeoutSec, defaultTimeoutForModel(effectiveModel)));
-        structuredLog({
-          level: "warn", ts: Date.now(), event: "vision_model_fallback",
-          agentId: agent.id, runId,
-          originalModel, fallbackModel,
-          message: `Model "${originalModel}" does not support vision — falling back to "${fallbackModel}".`,
-        });
-        void onLog("stderr",
-          `[openrouter adapter] model "${originalModel}" does not support image inputs — falling back to "${fallbackModel}".\n`,
-        );
-      } else {
-        // No working fallback found — either all candidates lack vision or
-        // the user explicitly disabled the fallback chain with [].
-        if (fallbackExplicitlyDisabled) {
-          visionFallbackNote = "vision fallback disabled (visionFallbackModels: [])";
-        } else {
-          visionFallbackNote = "vision: no fallback available";
-        }
-        structuredLog({
-          level: "warn", ts: Date.now(), event: "vision_not_supported",
-          agentId: agent.id, runId, model: effectiveModel,
-          fallbackDisabled: fallbackExplicitlyDisabled,
-          message: fallbackExplicitlyDisabled
-            ? `Model "${effectiveModel}" does not support vision and visionFallbackModels is [] (fallback disabled). Images may be silently stripped or cause an API error.`
-            : `Model "${effectiveModel}" does not support vision and no vision-capable fallback was available. Images may be silently stripped or cause an API error.`,
-        });
-        void onLog("stderr",
-          fallbackExplicitlyDisabled
-            ? `[openrouter adapter] WARNING: model "${effectiveModel}" does not support image inputs and vision fallback is disabled (visionFallbackModels: []) — images may be silently stripped or cause an error.\n`
-            : `[openrouter adapter] WARNING: model "${effectiveModel}" does not support image inputs and no vision fallback was available — images may be silently stripped or cause an error.\n`,
-        );
-      }
-    } else if (visionOk === null) {
-      // Could not verify — soft warning only, require_parameters handles provider filtering.
-      structuredLog({
-        level: "warn", ts: Date.now(), event: "vision_support_unknown",
-        agentId: agent.id, runId, model: effectiveModel,
-        message: `Could not verify vision support for "${effectiveModel}" (not found in OpenRouter /models or fetch failed). Images will be sent; require_parameters: true will filter non-vision providers.`,
-      });
-      void onLog("stderr",
-        `[openrouter adapter] WARNING: could not verify vision support for model "${effectiveModel}" — proceeding with require_parameters: true.\n`,
-      );
-    }
-    // visionOk === true: confirmed, no action needed
-  }
+  // ── Vision routing — delegated to orager ─────────────────────────────────
+  // Vision capability detection and model swapping is handled inside orager's
+  // loop.ts using its live model metadata cache. The adapter's job is simply to
+  // pass the configured visionModel through so orager can act on it.
+  // config.visionModel is set by the user via the Paperclip adapter config UI.
+  const visionFallbackNote: string | null = promptContent !== null && asString(config.visionModel, "").trim()
+    ? `visionModel configured: ${asString(config.visionModel, "").trim()} (routing handled by orager)`
+    : null;
 
   // Pre-read the instructions file once, shared by both spawn and daemon paths.
   // Using appendSystemPrompt (string content) on both paths guarantees identical
@@ -2039,6 +1962,10 @@ export async function executeAgentLoop(
     if (summarizeAt !== undefined) obj.summarizeAt = summarizeAt;
     if (summarizeModel) obj.summarizeModel = summarizeModel;
     if (summarizeKeepRecentTurns !== undefined) obj.summarizeKeepRecentTurns = summarizeKeepRecentTurns;
+
+    // Vision model — pass through to orager which owns vision routing logic
+    const _visionModel = asString(config.visionModel, "").trim();
+    if (_visionModel) obj.visionModel = _visionModel;
 
     // Extended agent loop options
     if (tagToolOutputs !== undefined) obj.tagToolOutputs = tagToolOutputs;
@@ -2449,6 +2376,7 @@ export async function executeAgentLoop(
           summarizeAt,
           summarizeModel: summarizeModel || undefined,
           summarizeKeepRecentTurns,
+          visionModel: asString(config.visionModel, "").trim() || undefined,
           tagToolOutputs,
           planMode: planMode || undefined,
           injectContext: injectContext || undefined,
