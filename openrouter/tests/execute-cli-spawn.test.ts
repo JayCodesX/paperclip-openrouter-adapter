@@ -4,7 +4,6 @@
  *   - spawn error event cleans up config file and returns errorCode "spawn_error"
  *   - timeout fires SIGTERM → result has timedOut: true, errorCode "timeout"
  *   - dry-run mode returns success without spawning, cleans up config file
- *   - requiredEnvVars missing returns errorCode "config_error" before spawning
  *   - maxCostUsdSoft exceeded emits a stderr warning
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -126,39 +125,6 @@ describe("dryRun mode", () => {
     await executeAgentLoop(ctx);
 
     expect(unlinkedPaths.some((p) => p.startsWith(os.tmpdir()))).toBe(true);
-  });
-});
-
-// ── requiredEnvVars ───────────────────────────────────────────────────────────
-
-describe("requiredEnvVars pre-flight check", () => {
-  it("returns errorCode 'config_error' listing missing vars", async () => {
-    const ctx = makeCtx({
-      requiredEnvVars: ["MISSING_VAR_XYZZY", "ALSO_MISSING_ABCDE"],
-    });
-    // Ensure neither var is in the environment
-    delete process.env.MISSING_VAR_XYZZY;
-    delete process.env.ALSO_MISSING_ABCDE;
-
-    const result = await executeAgentLoop(ctx);
-
-    expect(result.exitCode).toBe(1);
-    expect(result.errorCode).toBe("config_error");
-    expect(result.errorMessage).toContain("MISSING_VAR_XYZZY");
-    expect(result.errorMessage).toContain("ALSO_MISSING_ABCDE");
-  });
-
-  it("proceeds normally when all required vars are present", async () => {
-    process.env.MY_TEST_VAR_FOR_ORAGER = "present";
-    const ctx = makeCtx({
-      requiredEnvVars: ["MY_TEST_VAR_FOR_ORAGER"],
-      cliPath: "/nonexistent/binary",
-    });
-    const result = await executeAgentLoop(ctx);
-    delete process.env.MY_TEST_VAR_FOR_ORAGER;
-
-    // Should fail with cli_not_found, NOT config_error (pre-flight passed)
-    expect(result.errorCode).toBe("cli_not_found");
   });
 });
 

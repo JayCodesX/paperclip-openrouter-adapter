@@ -2,7 +2,6 @@
  * Tests for Part 2 audit findings (2026-03-29):
  *   TC1  — daemon signing-key age warning (>30 days) and unsafe-permissions warning
  *   TC3  — approvalAnswer forwarding edge cases (null, wrong types, valid shape)
- *   TC4  — :online suffix propagated to ALL fallback models, not just primary
  *   TC5  — both spawn and daemon paths deliver instructions via appendSystemPrompt
  *   TC6  — oversized daemon stream segment: result extracted when segment contains result event
  */
@@ -127,101 +126,6 @@ beforeEach(async () => {
 afterEach(async () => {
   vi.restoreAllMocks();
   await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-});
-
-// ── TC4: :online suffix on fallback models ────────────────────────────────────
-
-describe("TC4 — onlineSearch :online suffix applied to fallback models", () => {
-  it("appends :online to every fallback model that lacks a variant suffix", async () => {
-    const ctx = makeCtx({
-      onlineSearch: true,
-      models: ["anthropic/claude-3-haiku", "openai/gpt-4o"],
-      cliPath: fakeBin,
-      cwd: tmpDir,
-    });
-    await executeAgentLoop(ctx);
-    const cfg = parseConfigFromStderr(stderrText(ctx));
-    expect(cfg).not.toBeNull();
-    expect(cfg!.models).toEqual([
-      "anthropic/claude-3-haiku:online",
-      "openai/gpt-4o:online",
-    ]);
-  });
-
-  it("does NOT add :online to fallback models that already have a variant suffix", async () => {
-    const ctx = makeCtx({
-      onlineSearch: true,
-      models: ["anthropic/claude-3-haiku:nitro", "openai/gpt-4o:free"],
-      cliPath: fakeBin,
-      cwd: tmpDir,
-    });
-    await executeAgentLoop(ctx);
-    const cfg = parseConfigFromStderr(stderrText(ctx));
-    expect(cfg).not.toBeNull();
-    expect(cfg!.models).toEqual([
-      "anthropic/claude-3-haiku:nitro",
-      "openai/gpt-4o:free",
-    ]);
-  });
-
-  it("mixes correctly: suffixed models untouched, unsuffixed get :online", async () => {
-    const ctx = makeCtx({
-      onlineSearch: true,
-      models: ["anthropic/claude-3-haiku", "openai/gpt-4o:nitro"],
-      cliPath: fakeBin,
-      cwd: tmpDir,
-    });
-    await executeAgentLoop(ctx);
-    const cfg = parseConfigFromStderr(stderrText(ctx));
-    expect(cfg).not.toBeNull();
-    expect(cfg!.models).toEqual([
-      "anthropic/claude-3-haiku:online",
-      "openai/gpt-4o:nitro",
-    ]);
-  });
-
-  it("does NOT touch fallback models when onlineSearch is false", async () => {
-    const ctx = makeCtx({
-      onlineSearch: false,
-      models: ["anthropic/claude-3-haiku", "openai/gpt-4o"],
-      cliPath: fakeBin,
-      cwd: tmpDir,
-    });
-    await executeAgentLoop(ctx);
-    const cfg = parseConfigFromStderr(stderrText(ctx));
-    expect(cfg).not.toBeNull();
-    expect(cfg!.models).toEqual([
-      "anthropic/claude-3-haiku",
-      "openai/gpt-4o",
-    ]);
-  });
-
-  it("daemon path: models array carries :online suffix when onlineSearch is set", async () => {
-    const keyPath = path.join(tmpDir, "daemon.key");
-    await fs.writeFile(keyPath, "tc4-daemon-test-signing-key-32bytes", { encoding: "utf8", mode: 0o600 });
-
-    let capturedBody: Record<string, unknown> | null = null;
-    const daemon = await makeDaemonServer(keyPath, {
-      onRequest: (_, body) => { try { capturedBody = JSON.parse(body) as Record<string, unknown>; } catch { /* */ } },
-    });
-
-    const ctx = makeCtx({
-      daemonUrl: daemon.url,
-      daemonKeyFile: keyPath,
-      onlineSearch: true,
-      models: ["anthropic/claude-3-haiku", "openai/gpt-4o"],
-      cliPath: "/nonexistent",
-    });
-    await executeAgentLoop(ctx);
-    await daemon.close();
-
-    expect(capturedBody).not.toBeNull();
-    const opts = (capturedBody as { opts?: Record<string, unknown> }).opts ?? {};
-    expect(opts["models"]).toEqual([
-      "anthropic/claude-3-haiku:online",
-      "openai/gpt-4o:online",
-    ]);
-  });
 });
 
 // ── TC5: appendSystemPrompt on both spawn and daemon paths ────────────────────

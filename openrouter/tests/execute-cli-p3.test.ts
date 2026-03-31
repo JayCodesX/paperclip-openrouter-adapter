@@ -20,9 +20,6 @@ import {
   isDaemonCircuitOpen,
   DAEMON_CB_THRESHOLD,
   DAEMON_CB_RESET_MS,
-  recordRunCost,
-  checkCostAnomaly,
-  COST_ANOMALY_COOLDOWN_RUNS,
 } from "../src/server/execute-cli.js";
 
 // ── fake orager binary ────────────────────────────────────────────────────────
@@ -190,111 +187,6 @@ describe("daemon circuit breaker fallback", () => {
       recordDaemonFailure(url);
     }
     expect(isDaemonCircuitOpen(url)).toBe(false); // one below threshold
-  });
-});
-
-// ── cost anomaly detection ────────────────────────────────────────────────────
-
-describe("cost anomaly detection", () => {
-  beforeEach(() => {
-    _resetStateForTesting();
-  });
-
-  it("no anomaly emitted when window has fewer than 3 runs", () => {
-    recordRunCost(0.01);
-    recordRunCost(0.01);
-    const logs: string[] = [];
-    checkCostAnomaly(1.0, "a1", "r1", (_s, l) => logs.push(l));
-    expect(logs).toHaveLength(0);
-  });
-
-  it("emits stderr warning and cost_anomaly log when run cost > 2x average", () => {
-    // Fill window with low-cost runs so average is ~$0.01
-    for (let i = 0; i < 5; i++) recordRunCost(0.01);
-    const logs: string[] = [];
-    checkCostAnomaly(0.10, "a1", "r1", (_s, l) => logs.push(l));
-    expect(logs.join("")).toMatch(/COST ANOMALY/i);
-    const entries = _drainStructuredLogForTesting();
-    expect(entries.some((e) => e.event === "cost_anomaly")).toBe(true);
-  });
-
-  it("no anomaly when cost is within 2x of average", () => {
-    for (let i = 0; i < 5; i++) recordRunCost(0.05);
-    const logs: string[] = [];
-    checkCostAnomaly(0.09, "a1", "r1", (_s, l) => logs.push(l)); // 1.8x — under threshold
-    expect(logs).toHaveLength(0);
-  });
-
-  it("recordRunCost ignores zero and negative values", () => {
-    recordRunCost(0);
-    recordRunCost(-1);
-    // Window still has < 3 entries, so no anomaly check fires
-    for (let i = 0; i < 2; i++) recordRunCost(0.01);
-    const logs: string[] = [];
-    checkCostAnomaly(1.0, "a1", "r1", (_s, l) => logs.push(l));
-    // Only 2 valid entries in window — below the 3-entry minimum
-    expect(logs).toHaveLength(0);
-  });
-
-  it("window caps at COST_WINDOW_SIZE (20) — oldest entry is evicted", () => {
-    // Fill with high cost, then push 20 low-cost runs to evict high ones
-    recordRunCost(1.0); // this should be evicted after 20 more
-    for (let i = 0; i < 20; i++) recordRunCost(0.01);
-    // Average should now be ~$0.01 (all 20 low-cost runs, high one evicted)
-    const logs: string[] = [];
-    checkCostAnomaly(0.03, "a1", "r1", (_s, l) => logs.push(l)); // 3x — above 2x threshold
-    expect(logs.join("")).toMatch(/COST ANOMALY/i);
-  });
-
-  it("cooldown: anomaly fires once then is suppressed for the next COST_ANOMALY_COOLDOWN_RUNS - 1 calls", () => {
-    // Fill window with baseline so average is known
-    for (let i = 0; i < 5; i++) recordRunCost(0.01);
-
-    // First anomaly check — should fire (cooldown counter starts at COST_ANOMALY_COOLDOWN_RUNS)
-    const logs1: string[] = [];
-    checkCostAnomaly(0.10, "a1", "r1", (_s, l) => logs1.push(l));
-    expect(logs1.join("")).toMatch(/COST ANOMALY/i); // fires
-
-    // Immediately subsequent checks — cooldown suppresses them
-    for (let i = 0; i < COST_ANOMALY_COOLDOWN_RUNS - 1; i++) {
-      recordRunCost(0.01); // record a run (increments _runsSinceLastAnomaly)
-      const suppressed: string[] = [];
-      checkCostAnomaly(0.10, "a1", "r1", (_s, l) => suppressed.push(l));
-      expect(suppressed, `anomaly should be suppressed on run ${i + 1} after alert`).toHaveLength(0);
-    }
-  });
-
-  it("cooldown: alert fires again after COST_ANOMALY_COOLDOWN_RUNS runs have elapsed", () => {
-    for (let i = 0; i < 5; i++) recordRunCost(0.01);
-
-    // Fire the first anomaly
-    const first: string[] = [];
-    checkCostAnomaly(0.10, "a1", "r1", (_s, l) => first.push(l));
-    expect(first.join("")).toMatch(/COST ANOMALY/i);
-
-    // Record enough runs to exhaust the cooldown
-    for (let i = 0; i < COST_ANOMALY_COOLDOWN_RUNS; i++) {
-      recordRunCost(0.01);
-    }
-
-    // Should fire again now
-    const second: string[] = [];
-    checkCostAnomaly(0.10, "a1", "r1", (_s, l) => second.push(l));
-    expect(second.join("")).toMatch(/COST ANOMALY/i);
-  });
-
-  it("cooldown: _resetStateForTesting restores the counter to ready-to-fire state", () => {
-    for (let i = 0; i < 5; i++) recordRunCost(0.01);
-
-    // Fire anomaly — sets cooldown counter to 0
-    checkCostAnomaly(0.10, "a1", "r1", () => {});
-
-    // Reset should restore counter so next check fires immediately
-    _resetStateForTesting();
-    for (let i = 0; i < 5; i++) recordRunCost(0.01);
-    const afterReset: string[] = [];
-    checkCostAnomaly(0.10, "a1", "r1", (_s, l) => afterReset.push(l));
-    expect(afterReset.join("")).toMatch(/COST ANOMALY/i);
   });
 });
 

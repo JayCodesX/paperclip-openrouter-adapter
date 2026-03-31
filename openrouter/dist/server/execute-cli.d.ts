@@ -18,18 +18,6 @@ interface StructuredLogEntry {
     message?: string;
     [key: string]: unknown;
 }
-declare const COST_ANOMALY_COOLDOWN_RUNS = 10;
-declare function recordRunCost(costUsd: number): void;
-declare function checkCostAnomaly(costUsd: number, agentId: string, runId: string, onLog: (stream: "stdout" | "stderr", line: string) => Promise<void> | void): void;
-/**
- * Build the memory key for orager.
- *
- * - Falls back to `agentId` alone when `repoUrl` is null or empty.
- * - Otherwise returns `${agentId}_${repoSlug(repoUrl)}` truncated to 128 chars.
- */
-export declare function buildMemoryKey(agentId: string, repoUrl: string | null): string;
-export declare const VISION_CACHE_TTL_MS: number;
-export declare function checkVisionSupport(apiKey: string, model: string): Promise<boolean | null>;
 declare function buildApiKeyPool(config: Record<string, unknown>): {
     primary: string;
     pool: string[];
@@ -106,5 +94,5 @@ export declare function executeAgentLoop(ctx: AdapterExecutionContext): Promise<
 export declare function _resetStateForTesting(): void;
 /** Drain and return all structured log entries captured since the last reset. */
 export declare function _drainStructuredLogForTesting(): StructuredLogEntry[];
-export { buildApiKeyPool, recordRunCost, checkCostAnomaly, DEFAULT_MODEL, DAEMON_KEY_PATH, DAEMON_KEY_MAX_AGE_MS, isDaemonCircuitOpen, recordDaemonFailure, recordDaemonSuccess, DAEMON_CB_THRESHOLD, DAEMON_CB_RESET_MS, buildAdapterResult, processRateLimitTracker, _lastAutoStartAttemptMs, AUTO_START_COOLDOWN_MS, COST_ANOMALY_COOLDOWN_RUNS, };
+export { buildApiKeyPool, DEFAULT_MODEL, DAEMON_KEY_PATH, DAEMON_KEY_MAX_AGE_MS, isDaemonCircuitOpen, recordDaemonFailure, recordDaemonSuccess, DAEMON_CB_THRESHOLD, DAEMON_CB_RESET_MS, buildAdapterResult, processRateLimitTracker, _lastAutoStartAttemptMs, AUTO_START_COOLDOWN_MS, };
 //# sourceMappingURL=execute-cli.d.ts.map

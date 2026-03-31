@@ -28,7 +28,12 @@ async function listSessionsFromFilesystem(limit, offset) {
     try {
         entries = await fs.readdir(getSessionsDir());
     }
-    catch {
+    catch (err) {
+        // L-10: Log non-ENOENT errors so operators can diagnose session listing failures.
+        const code = err.code;
+        if (code !== "ENOENT") {
+            process.stderr.write(`[openrouter adapter] sessions: readdir failed: ${code ?? err}\n`);
+        }
         return { sessions: [], total: 0, limit, offset };
     }
     const sessionFiles = entries.filter((e) => e.endsWith(".json") && !e.endsWith(".run.lock"));
@@ -78,7 +83,12 @@ async function searchSessionsFromFilesystem(query, limit) {
     try {
         entries = await fs.readdir(getSessionsDir());
     }
-    catch {
+    catch (err) {
+        // L-10: Log non-ENOENT errors so operators can diagnose session search failures.
+        const code = err.code;
+        if (code !== "ENOENT") {
+            process.stderr.write(`[openrouter adapter] sessions: readdir failed: ${code ?? err}\n`);
+        }
         return { sessions: [], total: 0, query };
     }
     const q = query.toLowerCase();
@@ -126,7 +136,9 @@ async function fetchFromDaemon(daemonUrl, signingKey, agentId, endpoint) {
             return null;
         return await res.json();
     }
-    catch {
+    catch (err) {
+        // L-10: Log daemon fetch failures for debugging session retrieval issues.
+        process.stderr.write(`[openrouter adapter] sessions: daemon fetch failed for ${endpoint}: ${err instanceof Error ? err.message : String(err)}\n`);
         return null;
     }
 }

@@ -66,8 +66,6 @@ export async function listOpenRouterModels(): Promise<AdapterModel[]> {
 }
 
 // Synchronous read of the live cache — no fetch triggered.
-// Used by checkVisionSupport to avoid a redundant network call when the shared
-// list is already warm (populated by a prior listOpenRouterModels call).
 // Returns undefined if the cache is cold or expired.
 export function getModelFromLiveCache(model: string): AdapterModel | undefined {
   const now = Date.now();
