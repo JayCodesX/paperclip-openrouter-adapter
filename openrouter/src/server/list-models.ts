@@ -4,7 +4,7 @@ const OPENROUTER_MODELS_ENDPOINT = "https://openrouter.ai/api/v1/models";
 const TIMEOUT_MS = 5000;
 const CACHE_TTL_MS = 5 * 60_000; // 5 minutes — aligns with execute-cli.ts vision cache TTL
 
-export type AdapterModel = { id: string; label: string; supportsVision: boolean };
+export type AdapterModel = { id: string; label: string; supportsVision: boolean; supportsReasoning: boolean };
 
 let cached: { expiresAt: number; models: AdapterModel[] } | null = null;
 let _fetchInFlight: Promise<AdapterModel[]> | null = null;
@@ -34,7 +34,11 @@ async function fetchModels(): Promise<AdapterModel[]> {
       const modalities =
         r.input_modalities ?? arch?.input_modalities ?? [];
       const supportsVision = Array.isArray(modalities) && modalities.includes("image");
-      models.push({ id, label: name || id, supportsVision });
+      const supportedParams = Array.isArray(r.supported_parameters) ? r.supported_parameters : [];
+      // include_reasoning means the model exposes its thinking process with a
+      // configurable budget (R1, o3, Claude extended thinking, etc.).
+      const supportsReasoning = supportedParams.includes("include_reasoning");
+      models.push({ id, label: name || id, supportsVision, supportsReasoning });
     }
     return models;
   } catch {

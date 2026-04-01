@@ -2,6 +2,7 @@ export type AdapterModel = {
     id: string;
     label: string;
     supportsVision: boolean;
+    supportsReasoning: boolean;
 };
 export declare function listOpenRouterModels(): Promise<AdapterModel[]>;
 export declare function getModelFromLiveCache(model: string): AdapterModel | undefined;

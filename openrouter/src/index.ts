@@ -2,27 +2,26 @@ export const type = "openrouter";
 export const label = "OpenRouter (orager)";
 
 // Any valid OpenRouter model ID works. Full list at https://openrouter.ai/models
-export const models: { id: string; label: string; supportsVision: boolean }[] = [
+export const models: { id: string; label: string; supportsVision: boolean; supportsReasoning: boolean }[] = [
   // DeepSeek — text only
-  { id: "deepseek/deepseek-chat-v3-2", label: "DeepSeek V3.2", supportsVision: false },
-  { id: "deepseek/deepseek-chat-v3-2:free", label: "DeepSeek V3.2 (free)", supportsVision: false },
-  { id: "deepseek/deepseek-chat", label: "DeepSeek V3 (latest)", supportsVision: false },
-  { id: "deepseek/deepseek-r1", label: "DeepSeek R1 (reasoning)", supportsVision: false },
-  { id: "deepseek/deepseek-r1:free", label: "DeepSeek R1 (free, reasoning)", supportsVision: false },
-  // Anthropic — all Claude models support vision
-  { id: "anthropic/claude-sonnet-4-6", label: "Claude Sonnet 4.6", supportsVision: true },
-  { id: "anthropic/claude-sonnet-4-5", label: "Claude Sonnet 4.5", supportsVision: true },
-  { id: "anthropic/claude-opus-4-6", label: "Claude Opus 4.6", supportsVision: true },
-  { id: "anthropic/claude-haiku-4-5", label: "Claude Haiku 4.5", supportsVision: true },
+  { id: "deepseek/deepseek-chat-v3-0324", label: "DeepSeek V3 0324", supportsVision: false, supportsReasoning: false },
+  { id: "deepseek/deepseek-chat", label: "DeepSeek V3 (latest)", supportsVision: false, supportsReasoning: false },
+  { id: "deepseek/deepseek-r1", label: "DeepSeek R1 (reasoning)", supportsVision: false, supportsReasoning: true },
+  { id: "deepseek/deepseek-r1:free", label: "DeepSeek R1 (free, reasoning)", supportsVision: false, supportsReasoning: true },
+  // Anthropic — all Claude models support vision and extended thinking
+  { id: "anthropic/claude-sonnet-4-6", label: "Claude Sonnet 4.6", supportsVision: true, supportsReasoning: true },
+  { id: "anthropic/claude-sonnet-4-5", label: "Claude Sonnet 4.5", supportsVision: true, supportsReasoning: true },
+  { id: "anthropic/claude-opus-4-6", label: "Claude Opus 4.6", supportsVision: true, supportsReasoning: true },
+  { id: "anthropic/claude-haiku-4-5", label: "Claude Haiku 4.5", supportsVision: true, supportsReasoning: true },
   // OpenAI
-  { id: "openai/gpt-4o", label: "GPT-4o", supportsVision: true },
-  { id: "openai/gpt-4o-mini", label: "GPT-4o Mini", supportsVision: true },
-  { id: "openai/o3", label: "OpenAI o3 (reasoning)", supportsVision: true },
+  { id: "openai/gpt-4o", label: "GPT-4o", supportsVision: true, supportsReasoning: false },
+  { id: "openai/gpt-4o-mini", label: "GPT-4o Mini", supportsVision: true, supportsReasoning: false },
+  { id: "openai/o3", label: "OpenAI o3 (reasoning)", supportsVision: true, supportsReasoning: true },
   // Google — all Gemini models support vision
-  { id: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro", supportsVision: true },
-  { id: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash", supportsVision: true },
+  { id: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro", supportsVision: true, supportsReasoning: false },
+  { id: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash", supportsVision: true, supportsReasoning: false },
   // Meta — Llama 3.3 70B is text only
-  { id: "meta-llama/llama-3.3-70b-instruct", label: "Llama 3.3 70B", supportsVision: false },
+  { id: "meta-llama/llama-3.3-70b-instruct", label: "Llama 3.3 70B", supportsVision: false, supportsReasoning: false },
 ];
 
 export const agentConfigurationDoc = `# openrouter agent configuration
