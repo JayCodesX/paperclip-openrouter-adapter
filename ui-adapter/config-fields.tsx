@@ -26,6 +26,44 @@ const WAKE_REASONS = [
   "webhook",
 ] as const;
 
+const PROVIDER_SLUGS = [
+  "Anthropic",
+  "Azure",
+  "AWS Bedrock",
+  "Cloudflare",
+  "Cohere",
+  "DeepInfra",
+  "DeepSeek",
+  "Fireworks",
+  "Google",
+  "Google AI Studio",
+  "Groq",
+  "HuggingFace",
+  "Lambda",
+  "Lepton",
+  "Mancer",
+  "Meta",
+  "Microsoft",
+  "Mistral",
+  "Novita",
+  "OpenAI",
+  "Perplexity",
+  "Recursal",
+  "Replicate",
+  "SambaNova",
+  "Together",
+  "xAI",
+] as const;
+
+const EMBEDDING_MODELS = [
+  { id: "openai/text-embedding-3-small", label: "OpenAI: text-embedding-3-small" },
+  { id: "openai/text-embedding-3-large", label: "OpenAI: text-embedding-3-large" },
+  { id: "openai/text-embedding-ada-002", label: "OpenAI: text-embedding-ada-002" },
+  { id: "google/text-embedding-004", label: "Google: text-embedding-004" },
+  { id: "cohere/embed-english-v3.0", label: "Cohere: embed-english-v3.0" },
+  { id: "cohere/embed-multilingual-v3.0", label: "Cohere: embed-multilingual-v3.0" },
+] as const;
+
 interface TurnModelRule {
   model: string;
   afterTurn?: number;
@@ -165,6 +203,16 @@ export function OpenRouterConfigFields({
   };
 
   const visionModels = models.filter((m) => m.supportsVision);
+
+  // Determine if the currently selected model supports reasoning (extended thinking).
+  // Falls back to false when models haven't loaded yet or the model is unknown.
+  const selectedModelId = isCreate
+    ? (values!.model ?? "")
+    : eff("adapterConfig", "model", String(config.model ?? ""));
+  const selectedModel = models.find((m) => m.id === selectedModelId);
+  // supportsReasoning may not be in the shared types but is present at runtime
+  const selectedModelSupportsReasoning =
+    (selectedModel as { supportsReasoning?: boolean } | undefined)?.supportsReasoning ?? false;
 
   return (
     <>
@@ -517,68 +565,146 @@ export function OpenRouterConfigFields({
 
       <Field
         label="Fallback models"
-        hint="Comma-separated list of fallback model IDs tried in order if the primary model fails (429/503). E.g.: deepseek/deepseek-chat-v3-0324:nitro,anthropic/claude-haiku-4-5"
+        hint="Fallback model IDs tried in order if the primary model fails (429/503)."
       >
-        <DraftInput
-          value={
+        {(() => {
+          const raw = isCreate
+            ? values!.models
+            : config.models;
+          const current: string[] = Array.isArray(raw) ? (raw as string[]) : [];
+          const currentDisplay = isCreate
+            ? current
+            : (eff("adapterConfig", "models", current) as unknown as string[]) ?? current;
+          const commitModels = (arr: string[]) =>
             isCreate
-              ? Array.isArray(values!.models)
-                ? (values!.models as string[]).join(",")
-                : ""
-              : eff(
-                  "adapterConfig",
-                  "models",
-                  Array.isArray(config.models)
-                    ? (config.models as string[]).join(",")
-                    : "",
-                )
-          }
-          onCommit={(v) => {
-            const arr = v
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean);
-            return isCreate
               ? set!({ models: arr.length > 0 ? arr : undefined })
               : mark("adapterConfig", "models", arr.length > 0 ? arr : undefined);
-          }}
-          immediate
-          className={inputClass}
-          placeholder="model-id-1,model-id-2"
-        />
+          return (
+            <div className="space-y-2">
+              {currentDisplay.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {currentDisplay.map((id, i) => {
+                    const label = models.find((m) => m.id === id)?.label ?? id;
+                    return (
+                      <span
+                        key={i}
+                        className="inline-flex items-center gap-1 rounded bg-muted px-2 py-0.5 text-xs font-mono"
+                      >
+                        {label}
+                        <button
+                          type="button"
+                          className="text-muted-foreground hover:text-foreground"
+                          onClick={() => commitModels(currentDisplay.filter((_, j) => j !== i))}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
+              {models.length > 0 ? (
+                <select
+                  aria-label="Add fallback model"
+                  className={selectClass}
+                  value=""
+                  onChange={(e) => {
+                    if (e.target.value) commitModels([...currentDisplay, e.target.value]);
+                    e.target.value = "";
+                  }}
+                >
+                  <option value="">+ Add fallback model…</option>
+                  {models.map((m) => (
+                    <option key={m.id} value={m.id}>{m.label}</option>
+                  ))}
+                </select>
+              ) : (
+                <DraftInput
+                  value={currentDisplay.join(",")}
+                  onCommit={(v) => {
+                    const arr = v.split(",").map((s) => s.trim()).filter(Boolean);
+                    commitModels(arr);
+                  }}
+                  immediate
+                  className={inputClass}
+                  placeholder="model-id-1,model-id-2"
+                />
+              )}
+            </div>
+          );
+        })()}
       </Field>
 
       <Field
         label="Vision fallback models"
-        hint={`Comma-separated model IDs tried in order when the primary model doesn't support image inputs. Leave blank to use the default chain: google/gemini-2.0-flash-001, openai/gpt-4o, anthropic/claude-sonnet-4-5. Set to a single space to disable fallback entirely.`}
+        hint="Model IDs tried when the primary model doesn't support images. Leave blank for defaults (gemini-2.0-flash, gpt-4o, claude-sonnet)."
       >
-        <DraftInput
-          value={
+        {(() => {
+          const raw = isCreate
+            ? values!.visionFallbackModels
+            : config.visionFallbackModels;
+          const current: string[] = Array.isArray(raw) ? (raw as string[]) : [];
+          const currentDisplay = isCreate
+            ? current
+            : (eff("adapterConfig", "visionFallbackModels", current) as unknown as string[]) ?? current;
+          const commitVisionModels = (arr: string[]) =>
             isCreate
-              ? Array.isArray(values!.visionFallbackModels)
-                ? (values!.visionFallbackModels as string[]).join(",")
-                : ""
-              : eff(
-                  "adapterConfig",
-                  "visionFallbackModels",
-                  Array.isArray(config.visionFallbackModels)
-                    ? (config.visionFallbackModels as string[]).join(",")
-                    : "",
-                )
-          }
-          onCommit={(v) => {
-            const arr = v
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean);
-            return isCreate
               ? set!({ visionFallbackModels: arr.length > 0 ? arr : undefined })
               : mark("adapterConfig", "visionFallbackModels", arr.length > 0 ? arr : undefined);
-          }}
-          immediate
-          className={inputClass}
-          placeholder="google/gemini-2.0-flash-001,openai/gpt-4o"
-        />
+          return (
+            <div className="space-y-2">
+              {currentDisplay.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {currentDisplay.map((id, i) => {
+                    const label = models.find((m) => m.id === id)?.label ?? id;
+                    return (
+                      <span
+                        key={i}
+                        className="inline-flex items-center gap-1 rounded bg-muted px-2 py-0.5 text-xs font-mono"
+                      >
+                        {label}
+                        <button
+                          type="button"
+                          className="text-muted-foreground hover:text-foreground"
+                          onClick={() => commitVisionModels(currentDisplay.filter((_, j) => j !== i))}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
+              {visionModels.length > 0 ? (
+                <select
+                  aria-label="Add vision fallback model"
+                  className={selectClass}
+                  value=""
+                  onChange={(e) => {
+                    if (e.target.value) commitVisionModels([...currentDisplay, e.target.value]);
+                    e.target.value = "";
+                  }}
+                >
+                  <option value="">+ Add vision fallback model…</option>
+                  {visionModels.map((m) => (
+                    <option key={m.id} value={m.id}>{m.label}</option>
+                  ))}
+                </select>
+              ) : (
+                <DraftInput
+                  value={currentDisplay.join(",")}
+                  onCommit={(v) => {
+                    const arr = v.split(",").map((s) => s.trim()).filter(Boolean);
+                    commitVisionModels(arr);
+                  }}
+                  immediate
+                  className={inputClass}
+                  placeholder="google/gemini-2.0-flash-001,openai/gpt-4o"
+                />
+              )}
+            </div>
+          );
+        })()}
       </Field>
 
       {/* ===== RUN LIMITS ===== */}
@@ -766,67 +892,6 @@ export function OpenRouterConfigFields({
         />
       </Field>
 
-      {/* ===== DAEMON ===== */}
-      <p className={sectionHeadingClass}>Daemon</p>
-
-      <Field
-        label="Daemon URL"
-        hint="Override daemon URL (e.g. http://127.0.0.1:3456). Also read from ORAGER_DAEMON_URL env var."
-      >
-        <DraftInput
-          value={
-            isCreate
-              ? String(values!.daemonUrl ?? "")
-              : eff(
-                  "adapterConfig",
-                  "daemonUrl",
-                  String(config.daemonUrl ?? ""),
-                )
-          }
-          onCommit={(v) =>
-            isCreate
-              ? set!({ daemonUrl: v || undefined })
-              : mark("adapterConfig", "daemonUrl", v || undefined)
-          }
-          immediate
-          className={inputClass}
-          placeholder="http://127.0.0.1:3456"
-        />
-      </Field>
-
-      <Field
-        label="API key pool"
-        hint="Additional OpenRouter API keys, comma-separated. On 429, orager rotates through these mid-run before escalating to model fallback. The primary API key is always first."
-      >
-        <DraftInput
-          value={
-            isCreate
-              ? Array.isArray(values!.apiKeys)
-                ? (values!.apiKeys as string[]).join(",")
-                : ""
-              : eff(
-                  "adapterConfig",
-                  "apiKeys",
-                  Array.isArray(config.apiKeys)
-                    ? (config.apiKeys as string[]).join(",")
-                    : "",
-                )
-          }
-          onCommit={(v) => {
-            const arr = v
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean);
-            return isCreate
-              ? set!({ apiKeys: arr.length > 0 ? arr : undefined })
-              : mark("adapterConfig", "apiKeys", arr.length > 0 ? arr : undefined);
-          }}
-          immediate
-          className={inputClass}
-          placeholder="sk-or-key2,sk-or-key3"
-        />
-      </Field>
-
       {/* ===== CONTEXT ===== */}
       <p className={sectionHeadingClass}>Context</p>
 
@@ -850,21 +915,41 @@ export function OpenRouterConfigFields({
 
       <Field
         label="Summarize model"
-        hint="Model used for session summarization. Defaults to the primary model. A cheap fast model (e.g. deepseek/deepseek-chat-v3-0324) works well here."
+        hint="Model used for session summarization. Defaults to the primary model. A cheap fast model works well here."
       >
-        <DraftInput
-          value={eff(
-            "adapterConfig",
-            "summarizeModel",
-            String(config.summarizeModel ?? ""),
-          )}
-          onCommit={(v) =>
-            mark("adapterConfig", "summarizeModel", v || undefined)
-          }
-          immediate
-          className={inputClass}
-          placeholder="deepseek/deepseek-chat-v3-0324"
-        />
+        {models.length > 0 ? (
+          <select
+            aria-label="Summarize model"
+            className={selectClass}
+            value={eff(
+              "adapterConfig",
+              "summarizeModel",
+              String(config.summarizeModel ?? ""),
+            )}
+            onChange={(e) =>
+              mark("adapterConfig", "summarizeModel", e.target.value || undefined)
+            }
+          >
+            <option value="">Default (use primary model)</option>
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>{m.label}</option>
+            ))}
+          </select>
+        ) : (
+          <DraftInput
+            value={eff(
+              "adapterConfig",
+              "summarizeModel",
+              String(config.summarizeModel ?? ""),
+            )}
+            onCommit={(v) =>
+              mark("adapterConfig", "summarizeModel", v || undefined)
+            }
+            immediate
+            className={inputClass}
+            placeholder="deepseek/deepseek-chat-v3-0324"
+          />
+        )}
       </Field>
 
       {/* ===== PROMPTS ===== */}
@@ -976,262 +1061,8 @@ export function OpenRouterConfigFields({
         />
       </Field>
 
-      {/* ===== SAMPLING (collapsible) ===== */}
-      <details>
-        <summary className="text-xs font-medium text-muted-foreground cursor-pointer py-2 select-none hover:text-foreground transition-colors">
-          Sampling
-        </summary>
-        <div className="space-y-3 pt-1 pb-2">
-          <Field
-            label="Temperature (0.0–2.0)"
-            hint="Controls response randomness. Lower values are more deterministic, higher values more creative."
-          >
-            <DraftNumberInput
-              value={
-                isCreate
-                  ? Number(values!.temperature ?? 0)
-                  : eff(
-                      "adapterConfig",
-                      "temperature",
-                      Number(config.temperature ?? 0),
-                    )
-              }
-              onCommit={(v) =>
-                isCreate
-                  ? set!({ temperature: v > 0 ? v : undefined })
-                  : mark("adapterConfig", "temperature", v > 0 ? v : undefined)
-              }
-              immediate
-              className={inputClass}
-            />
-          </Field>
-
-          <Field
-            label="Top P (0.0–1.0)"
-            hint="Nucleus sampling threshold. Only consider tokens comprising the top P probability mass."
-          >
-            <DraftNumberInput
-              value={
-                isCreate
-                  ? Number(values!.top_p ?? 0)
-                  : eff("adapterConfig", "top_p", Number(config.top_p ?? 0))
-              }
-              onCommit={(v) =>
-                isCreate
-                  ? set!({ top_p: v > 0 ? v : undefined })
-                  : mark("adapterConfig", "top_p", v > 0 ? v : undefined)
-              }
-              immediate
-              className={inputClass}
-            />
-          </Field>
-
-          <Field label="Seed" hint="Integer seed for reproducible outputs.">
-            <DraftNumberInput
-              value={
-                isCreate
-                  ? Number(values!.seed ?? 0)
-                  : eff("adapterConfig", "seed", Number(config.seed ?? 0))
-              }
-              onCommit={(v) =>
-                isCreate
-                  ? set!({ seed: v !== 0 ? v : undefined })
-                  : mark("adapterConfig", "seed", v !== 0 ? v : undefined)
-              }
-              immediate
-              className={inputClass}
-            />
-          </Field>
-
-          <Field
-            label="Stop sequences"
-            hint="Comma-separated stop sequences. Generation halts when any of these strings is encountered."
-          >
-            <DraftInput
-              value={
-                isCreate
-                  ? Array.isArray(values!.stop)
-                    ? (values!.stop as string[]).join(",")
-                    : ""
-                  : eff(
-                      "adapterConfig",
-                      "stop",
-                      Array.isArray(config.stop)
-                        ? (config.stop as string[]).join(",")
-                        : "",
-                    )
-              }
-              onCommit={(v) => {
-                const arr = v
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean);
-                return isCreate
-                  ? set!({ stop: arr.length > 0 ? arr : undefined })
-                  : mark(
-                      "adapterConfig",
-                      "stop",
-                      arr.length > 0 ? arr : undefined,
-                    );
-              }}
-              immediate
-              className={inputClass}
-              placeholder="</s>,<|end|>"
-            />
-          </Field>
-
-          <Field
-            label="Repetition penalty (0.0–2.0)"
-            hint="OpenRouter repetition penalty. Values above 1.0 discourage repeated tokens."
-          >
-            <DraftNumberInput
-              value={
-                isCreate
-                  ? Number(values!.repetition_penalty ?? 0)
-                  : eff(
-                      "adapterConfig",
-                      "repetition_penalty",
-                      Number(config.repetition_penalty ?? 0),
-                    )
-              }
-              onCommit={(v) =>
-                isCreate
-                  ? set!({ repetition_penalty: v > 0 ? v : undefined })
-                  : mark(
-                      "adapterConfig",
-                      "repetition_penalty",
-                      v > 0 ? v : undefined,
-                    )
-              }
-              immediate
-              className={inputClass}
-            />
-          </Field>
-
-          <Field
-            label="Frequency penalty"
-            hint="Frequency-based token penalty. Positive values reduce repetition of frequent tokens."
-          >
-            <DraftNumberInput
-              value={
-                isCreate
-                  ? Number(values!.frequency_penalty ?? 0)
-                  : eff(
-                      "adapterConfig",
-                      "frequency_penalty",
-                      Number(config.frequency_penalty ?? 0),
-                    )
-              }
-              onCommit={(v) =>
-                isCreate
-                  ? set!({ frequency_penalty: v !== 0 ? v : undefined })
-                  : mark(
-                      "adapterConfig",
-                      "frequency_penalty",
-                      v !== 0 ? v : undefined,
-                    )
-              }
-              immediate
-              className={inputClass}
-            />
-          </Field>
-
-          <Field
-            label="Presence penalty"
-            hint="Presence-based token penalty. Positive values encourage the model to discuss new topics."
-          >
-            <DraftNumberInput
-              value={
-                isCreate
-                  ? Number(values!.presence_penalty ?? 0)
-                  : eff(
-                      "adapterConfig",
-                      "presence_penalty",
-                      Number(config.presence_penalty ?? 0),
-                    )
-              }
-              onCommit={(v) =>
-                isCreate
-                  ? set!({ presence_penalty: v !== 0 ? v : undefined })
-                  : mark(
-                      "adapterConfig",
-                      "presence_penalty",
-                      v !== 0 ? v : undefined,
-                    )
-              }
-              immediate
-              className={inputClass}
-            />
-          </Field>
-
-          {/* Advanced cost overrides — nested within Sampling for discoverability */}
-          <details>
-            <summary className="text-xs text-muted-foreground/60 cursor-pointer py-1 select-none hover:text-muted-foreground transition-colors">
-              Advanced cost overrides
-            </summary>
-            <div className="space-y-3 pt-2">
-              <Field
-                label="Cost per input token"
-                hint="Override OpenRouter's pricing data for input tokens. Only needed if OpenRouter reports incorrect costs for this model."
-              >
-                <DraftNumberInput
-                  value={
-                    isCreate
-                      ? Number(values!.costPerInputToken ?? 0)
-                      : eff(
-                          "adapterConfig",
-                          "costPerInputToken",
-                          Number(config.costPerInputToken ?? 0),
-                        )
-                  }
-                  onCommit={(v) =>
-                    isCreate
-                      ? set!({ costPerInputToken: v > 0 ? v : undefined })
-                      : mark(
-                          "adapterConfig",
-                          "costPerInputToken",
-                          v > 0 ? v : undefined,
-                        )
-                  }
-                  immediate
-                  className={inputClass}
-                />
-              </Field>
-
-              <Field
-                label="Cost per output token"
-                hint="Override OpenRouter's pricing data for output tokens."
-              >
-                <DraftNumberInput
-                  value={
-                    isCreate
-                      ? Number(values!.costPerOutputToken ?? 0)
-                      : eff(
-                          "adapterConfig",
-                          "costPerOutputToken",
-                          Number(config.costPerOutputToken ?? 0),
-                        )
-                  }
-                  onCommit={(v) =>
-                    isCreate
-                      ? set!({ costPerOutputToken: v > 0 ? v : undefined })
-                      : mark(
-                          "adapterConfig",
-                          "costPerOutputToken",
-                          v > 0 ? v : undefined,
-                        )
-                  }
-                  immediate
-                  className={inputClass}
-                />
-              </Field>
-            </div>
-          </details>
-        </div>
-      </details>
-
-      {/* ===== REASONING (collapsible) ===== */}
-      <details>
+      {/* ===== REASONING (collapsible, only for models that support extended thinking) ===== */}
+      {selectedModelSupportsReasoning && <details>
         <summary className="text-xs font-medium text-muted-foreground cursor-pointer py-2 select-none hover:text-foreground transition-colors">
           Reasoning (extended thinking)
         </summary>
@@ -1258,13 +1089,6 @@ export function OpenRouterConfigFields({
             </select>
           </Field>
 
-          <ToggleField
-            label="Include reasoning in response"
-            hint="When on, reasoning tokens are included in the response. Off by default (exclude: true) to save cost."
-            checked={reasoning.exclude === false}
-            onChange={(v) => commitReasoning({ exclude: !v })}
-          />
-
           <Field
             label="Reasoning max tokens"
             hint="Maximum reasoning token budget. Leave 0 to let the effort level decide."
@@ -1279,7 +1103,7 @@ export function OpenRouterConfigFields({
             />
           </Field>
         </div>
-      </details>
+      </details>}
 
       {/* ===== PROVIDER ROUTING (collapsible) ===== */}
       <details>
@@ -1289,59 +1113,101 @@ export function OpenRouterConfigFields({
         <div className="space-y-3 pt-1 pb-2">
           <Field
             label="Provider order"
-            hint="Comma-separated preferred provider slugs. E.g. DeepSeek,Together"
+            hint="Preferred provider priority. First provider is tried first."
           >
-            <DraftInput
-              value={(provider.order ?? []).join(",")}
-              onCommit={(v) => {
-                const arr = v
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean);
-                commitProvider({ order: arr.length > 0 ? arr : undefined });
-              }}
-              immediate
-              className={inputClass}
-              placeholder="DeepSeek,Together"
-            />
+            {(() => {
+              const current = provider.order ?? [];
+              return (
+                <div className="space-y-2">
+                  {current.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {current.map((slug, i) => (
+                        <span key={i} className="inline-flex items-center gap-1 rounded bg-muted px-2 py-0.5 text-xs font-mono">
+                          {slug}
+                          <button type="button" className="text-muted-foreground hover:text-foreground"
+                            onClick={() => commitProvider({ order: current.filter((_, j) => j !== i) })}
+                          >×</button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <select aria-label="Add provider to order" className={selectClass} value=""
+                    onChange={(e) => { if (e.target.value) commitProvider({ order: [...current, e.target.value] }); e.target.value = ""; }}
+                  >
+                    <option value="">+ Add provider…</option>
+                    {PROVIDER_SLUGS.filter((s) => !current.includes(s)).map((s) => (
+                      <option key={s} value={s}>{s}</option>
+                    ))}
+                  </select>
+                </div>
+              );
+            })()}
           </Field>
 
           <Field
             label="Provider allowlist"
-            hint="Comma-separated provider slugs. Only these providers will be used."
+            hint="Only these providers will be used."
           >
-            <DraftInput
-              value={(provider.only ?? []).join(",")}
-              onCommit={(v) => {
-                const arr = v
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean);
-                commitProvider({ only: arr.length > 0 ? arr : undefined });
-              }}
-              immediate
-              className={inputClass}
-              placeholder="DeepSeek"
-            />
+            {(() => {
+              const current = provider.only ?? [];
+              return (
+                <div className="space-y-2">
+                  {current.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {current.map((slug, i) => (
+                        <span key={i} className="inline-flex items-center gap-1 rounded bg-muted px-2 py-0.5 text-xs font-mono">
+                          {slug}
+                          <button type="button" className="text-muted-foreground hover:text-foreground"
+                            onClick={() => commitProvider({ only: current.filter((_, j) => j !== i) })}
+                          >×</button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <select aria-label="Add provider to allowlist" className={selectClass} value=""
+                    onChange={(e) => { if (e.target.value) commitProvider({ only: [...current, e.target.value] }); e.target.value = ""; }}
+                  >
+                    <option value="">+ Add provider…</option>
+                    {PROVIDER_SLUGS.filter((s) => !current.includes(s)).map((s) => (
+                      <option key={s} value={s}>{s}</option>
+                    ))}
+                  </select>
+                </div>
+              );
+            })()}
           </Field>
 
           <Field
             label="Provider blocklist"
-            hint="Comma-separated provider slugs to exclude."
+            hint="These providers will be excluded."
           >
-            <DraftInput
-              value={(provider.ignore ?? []).join(",")}
-              onCommit={(v) => {
-                const arr = v
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean);
-                commitProvider({ ignore: arr.length > 0 ? arr : undefined });
-              }}
-              immediate
-              className={inputClass}
-              placeholder="Azure"
-            />
+            {(() => {
+              const current = provider.ignore ?? [];
+              return (
+                <div className="space-y-2">
+                  {current.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {current.map((slug, i) => (
+                        <span key={i} className="inline-flex items-center gap-1 rounded bg-muted px-2 py-0.5 text-xs font-mono">
+                          {slug}
+                          <button type="button" className="text-muted-foreground hover:text-foreground"
+                            onClick={() => commitProvider({ ignore: current.filter((_, j) => j !== i) })}
+                          >×</button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <select aria-label="Add provider to blocklist" className={selectClass} value=""
+                    onChange={(e) => { if (e.target.value) commitProvider({ ignore: [...current, e.target.value] }); e.target.value = ""; }}
+                  >
+                    <option value="">+ Add provider…</option>
+                    {PROVIDER_SLUGS.filter((s) => !current.includes(s)).map((s) => (
+                      <option key={s} value={s}>{s}</option>
+                    ))}
+                  </select>
+                </div>
+              );
+            })()}
           </Field>
 
           <Field
@@ -1483,23 +1349,27 @@ export function OpenRouterConfigFields({
 
       <Field
         label="Embedding Model"
-        hint="OpenRouter embedding model ID (e.g. openai/text-embedding-3-small). Only used when Memory Retrieval Mode is 'embedding'."
+        hint="Embedding model for memory retrieval. Only used when Memory Retrieval Mode is 'embedding'."
       >
-        <DraftInput
+        <select
+          aria-label="Embedding Model"
+          className={selectClass}
           value={
             isCreate
               ? String(values!.memoryEmbeddingModel ?? "")
               : eff("adapterConfig", "memoryEmbeddingModel", String(config.memoryEmbeddingModel ?? ""))
           }
-          onCommit={(v) =>
+          onChange={(e) =>
             isCreate
-              ? set!({ memoryEmbeddingModel: v || undefined })
-              : mark("adapterConfig", "memoryEmbeddingModel", v || undefined)
+              ? set!({ memoryEmbeddingModel: e.target.value || undefined })
+              : mark("adapterConfig", "memoryEmbeddingModel", e.target.value || undefined)
           }
-          immediate
-          className={inputClass}
-          placeholder="openai/text-embedding-3-small"
-        />
+        >
+          <option value="">Default (openai/text-embedding-3-small)</option>
+          {EMBEDDING_MODELS.map((m) => (
+            <option key={m.id} value={m.id}>{m.label}</option>
+          ))}
+        </select>
       </Field>
 
       <Field
@@ -1526,76 +1396,6 @@ export function OpenRouterConfigFields({
         />
       </Field>
 
-      {/* ===== API KEY ISOLATION ===== */}
-      <p className={sectionHeadingClass}>API Key Isolation</p>
-
-      <Field
-        label="Agent API Key"
-        hint="Per-agent OpenRouter API key. Overrides the global key — isolates this agent's rate limits from others."
-      >
-        <DraftInput
-          value={
-            isCreate
-              ? String(values!.agentApiKey ?? "")
-              : eff("adapterConfig", "agentApiKey", String(config.agentApiKey ?? ""))
-          }
-          onCommit={(v) =>
-            isCreate
-              ? set!({ agentApiKey: v || undefined })
-              : mark("adapterConfig", "agentApiKey", v || undefined)
-          }
-          immediate
-          className={inputClass}
-          placeholder="sk-or-..."
-        />
-      </Field>
-
-      {/* ===== DEV / DEBUG ===== */}
-      <p className={sectionHeadingClass}>Dev / debug</p>
-
-      {(() => {
-        const isDryRun: boolean = isCreate
-          ? (values!.dryRun as boolean) ?? false
-          : eff("adapterConfig", "dryRun", config.dryRun === true);
-        return (
-          <>
-            <ToggleField
-              label="Dry run"
-              hint="When enabled, the adapter logs what it would do but makes no API calls. Use to verify config without spending tokens."
-              checked={isDryRun}
-              onChange={(v) =>
-                isCreate
-                  ? set!({ dryRun: v })
-                  : mark("adapterConfig", "dryRun", v)
-              }
-            />
-            {isDryRun && (
-              <div className="rounded-md border border-yellow-500/40 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-600 dark:text-yellow-400">
-                ⚠️ Dry-run mode is active — the agent will plan actions but not execute tools or make changes.
-              </div>
-            )}
-          </>
-        );
-      })()}
-
-      <ToggleField
-        label="Skip permissions"
-        hint={help.dangerouslySkipPermissions}
-        checked={
-          isCreate
-            ? (values!.dangerouslySkipPermissions as boolean) ?? false
-            : eff(
-                "adapterConfig",
-                "dangerouslySkipPermissions",
-                config.dangerouslySkipPermissions === true,
-              )
-        }
-        onChange={(v) =>
-          isCreate
-            ? set!({ dangerouslySkipPermissions: v })
-            : mark("adapterConfig", "dangerouslySkipPermissions", v)
-        }
-      />
     </>
   );
 }

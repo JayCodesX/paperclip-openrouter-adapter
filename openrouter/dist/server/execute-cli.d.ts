@@ -81,7 +81,7 @@ interface BuildAdapterResultOpts {
     signal: NodeJS.Signals | null;
 }
 declare function buildAdapterResult(opts: BuildAdapterResultOpts): AdapterExecutionResult;
-declare const DEFAULT_MODEL = "deepseek/deepseek-chat-v3-2";
+declare const DEFAULT_MODEL = "deepseek/deepseek-chat-v3-0324";
 /**
  * Execute an autonomous agent loop by spawning the `orager` CLI as a
  * subprocess, using the same pattern as local CLI adapters in Paperclip.

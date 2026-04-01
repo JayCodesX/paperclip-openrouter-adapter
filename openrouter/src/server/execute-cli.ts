@@ -616,6 +616,10 @@ interface DaemonRunOpts {
   memoryEmbeddingModel?: string;
   memoryRetrievalThreshold?: number;
   memoryMaxChars?: number;
+  // ── Per-run env injection ────────────────────────────────────────────────
+  // Paperclip context vars (PAPERCLIP_API_KEY, PAPERCLIP_TASK_ID, etc.) must
+  // be injected per-run in daemon mode since the daemon process doesn't have them.
+  env?: Record<string, string>;
 }
 
 /**
@@ -1048,7 +1052,7 @@ function buildAdapterResult(opts: BuildAdapterResultOpts): AdapterExecutionResul
 }
 
 const DEFAULT_CLI = "orager";
-const DEFAULT_MODEL = "deepseek/deepseek-chat-v3-2";
+const DEFAULT_MODEL = "deepseek/deepseek-chat-v3-0324";
 const DEFAULT_MAX_TURNS = 20;
 const DEFAULT_MAX_RETRIES = 3;
 // Ordered fallback chain tried when the configured model doesn't support vision.
@@ -1627,8 +1631,23 @@ export async function executeAgentLoop(
     } catch {
       // cwd doesn't exist yet or isn't accessible — fall back to raw cwd
     }
-    // Must stay within cwd (prevent ../../etc/passwd traversal)
-    if (!real.startsWith(realCwd + path.sep) && real !== realCwd) {
+    // Must stay within cwd OR the same paperclip instance root.
+    // Paperclip stores instructions under ~/.paperclip/instances/<id>/companies/…
+    // while the workspace may be under ~/.paperclip/instances/<id>/workspaces/…
+    // Both are trusted paths set by the orchestrator.
+    const withinCwd = real.startsWith(realCwd + path.sep) || real === realCwd;
+    const paperclipInstanceRoot = (() => {
+      const marker = `${path.sep}.paperclip${path.sep}instances${path.sep}`;
+      const idx = realCwd.indexOf(marker);
+      if (idx < 0) return null;
+      // e.g. /Users/x/.paperclip/instances/default
+      const afterMarker = realCwd.indexOf(path.sep, idx + marker.length);
+      return afterMarker < 0 ? realCwd.slice(0, realCwd.length) : realCwd.slice(0, afterMarker);
+    })();
+    const withinPaperclipInstance = paperclipInstanceRoot
+      ? real.startsWith(paperclipInstanceRoot + path.sep)
+      : false;
+    if (!withinCwd && !withinPaperclipInstance) {
       void onLog("stderr", `[openrouter adapter] WARNING: instructionsFilePath '${instructionsFilePath}' is outside cwd — ignoring\n`);
       return "";
     }
@@ -1800,10 +1819,12 @@ export async function executeAgentLoop(
     if (toolChoice) obj.tool_choice = toolChoice;
     obj.parallel_tool_calls = parallelToolCalls;
 
-    // Reasoning
+    // Reasoning — only send when effort or max_tokens is explicitly set.
+    // Sending reasoningExclude alone for non-reasoning models is a no-op that
+    // can trigger require_parameters filtering.
     if (reasoningEffort) obj.reasoningEffort = reasoningEffort;
     if (reasoningMaxTokens !== undefined) obj.reasoningMaxTokens = reasoningMaxTokens;
-    if (reasoningExclude) obj.reasoningExclude = true;
+    if ((reasoningEffort || reasoningMaxTokens) && reasoningExclude) obj.reasoningExclude = true;
 
     // Provider routing — pass as comma-separated strings (matching CLI format)
     if (providerOrder) obj.providerOrder = providerOrder.split(",").filter(Boolean);
@@ -2067,6 +2088,7 @@ export async function executeAgentLoop(
     ...paperclipEnv,
     ...contextEnv,
     PAPERCLIP_RUN_ID: runId,
+    PROTOCOL_API_KEY: apiKey,
     OPENROUTER_API_KEY: apiKey,
     ORAGER_API_KEY: apiKey,
   };
@@ -2139,13 +2161,25 @@ export async function executeAgentLoop(
   }
 
   // ── Daemon fast-path ────────────────────────────────────────────────────────
-  // If ORAGER_DAEMON_URL (or config.daemonUrl) is set, attempt to route this
-  // run through the persistent orager daemon instead of spawning a subprocess.
-  // The daemon eliminates Node.js startup overhead (~50-200ms) and keeps all
-  // in-process caches warm (skills, tool results, LLM prompt cache via sticky routing).
-  // Falls back to the spawn path if the daemon is unreachable.
-  const _rawDaemonUrl =
+  // By default, route runs through the persistent orager daemon for better
+  // performance (no Node.js startup overhead) and visibility (runs appear in
+  // the orager dashboard). Falls back to the spawn path if no daemon is found.
+  // Auto-detects the daemon by reading ~/.orager/daemon.port when no explicit
+  // URL is configured.
+  const DAEMON_PORT_FILE = path.join(os.homedir(), ".orager", "daemon.port");
+  let _rawDaemonUrl =
     asString(config.daemonUrl, "") || process.env.ORAGER_DAEMON_URL || "";
+  if (!_rawDaemonUrl) {
+    try {
+      const portStr = await fs.readFile(DAEMON_PORT_FILE, "utf8");
+      const port = parseInt(portStr.trim(), 10);
+      if (!isNaN(port) && port > 0) {
+        _rawDaemonUrl = `http://127.0.0.1:${port}`;
+      }
+    } catch {
+      // No port file — daemon not running, will fall through to spawn path
+    }
+  }
   // Security: reject non-loopback daemon URLs to prevent SSRF. The daemon binds
   // to 127.0.0.1 by design and should never be reached via an external address.
   const daemonBaseUrl = (() => {
@@ -2189,7 +2223,7 @@ export async function executeAgentLoop(
       const buildDaemonRunOpts = async (): Promise<DaemonRunOpts> => {
         const _responseFormat = parseObject(config.responseFormat);
         return {
-          apiKey,
+          // apiKey is daemon-side only — not sent per-request
           model: effectiveModel,
           models: models.length > 0 ? models : undefined,
           sessionId: previousSessionId || null,
@@ -2215,7 +2249,10 @@ export async function executeAgentLoop(
           min_p,
           seed,
           stop: stopTokens.length > 0 ? stopTokens : undefined,
-          reasoning: (reasoningEffort || reasoningMaxTokens || reasoningExclude)
+          // Only send reasoning when effort or max_tokens is set.
+          // Sending reasoning: { exclude: true } alone causes require_parameters
+          // to filter out providers for non-reasoning models (404).
+          reasoning: (reasoningEffort || reasoningMaxTokens)
             ? {
                 ...(reasoningEffort ? { effort: reasoningEffort } : {}),
                 ...(reasoningMaxTokens ? { max_tokens: reasoningMaxTokens } : {}),
@@ -2243,7 +2280,7 @@ export async function executeAgentLoop(
           summarizeAt,
           summarizeModel: summarizeModel || undefined,
           summarizeKeepRecentTurns,
-          visionModel: asString(config.visionModel, "").trim() || undefined,
+          // visionModel is daemon-side config — not sent per-request
           tagToolOutputs,
           planMode: planMode || undefined,
           injectContext: injectContext || undefined,
@@ -2267,7 +2304,7 @@ export async function executeAgentLoop(
           toolErrorBudgetHardStop,
           appendSystemPrompt: instructionsFileContent,
           promptContent: promptContent ?? undefined,
-          approvalMode,
+          // approvalMode is daemon-side config — not sent per-request
           ...(approvalAnswer ? { approvalAnswer } : {}),
           ...(typeof _responseFormat.type === "string" && _responseFormat.type ? { response_format: _responseFormat } : {}),
           timeoutSec,
@@ -2285,6 +2322,24 @@ export async function executeAgentLoop(
             : {}),
           ...(asNumber(config.memoryMaxChars, 0) > 0 ? { memoryMaxChars: asNumber(config.memoryMaxChars, 0) } : {}),
           ...(asNumber(config.memoryRetrievalThreshold, -1) >= 0 ? { memoryRetrievalThreshold: asNumber(config.memoryRetrievalThreshold, 0) } : {}),
+          // ── Per-run env injection ──────────────────────────────────────────
+          // The daemon process doesn't have Paperclip context vars in its env.
+          // Pass PAPERCLIP_* vars (and any user-configured configEnv vars) so
+          // the agent can authenticate and use Paperclip skills (list-issues,
+          // get-task, post-comment, etc.) when running via the daemon path.
+          env: (() => {
+            const daemonEnv: Record<string, string> = {};
+            // All PAPERCLIP_* vars from the constructed env (includes paperclipEnv,
+            // contextEnv, PAPERCLIP_RUN_ID, and PAPERCLIP_API_KEY if authToken set)
+            for (const [k, v] of Object.entries(env)) {
+              if (k.startsWith("PAPERCLIP_")) daemonEnv[k] = v;
+            }
+            // User-configured env vars from config.env (arbitrary custom vars)
+            for (const [k, v] of Object.entries(configEnv)) {
+              if (typeof v === "string" && !k.startsWith("PAPERCLIP_")) daemonEnv[k] = v;
+            }
+            return Object.keys(daemonEnv).length > 0 ? daemonEnv : undefined;
+          })(),
         };
       };
       const daemonOpts = await buildDaemonRunOpts();

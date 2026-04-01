@@ -29,7 +29,11 @@ async function fetchModels() {
                 : null;
             const modalities = r.input_modalities ?? arch?.input_modalities ?? [];
             const supportsVision = Array.isArray(modalities) && modalities.includes("image");
-            models.push({ id, label: name || id, supportsVision });
+            const supportedParams = Array.isArray(r.supported_parameters) ? r.supported_parameters : [];
+            // include_reasoning means the model exposes its thinking process with a
+            // configurable budget (R1, o3, Claude extended thinking, etc.).
+            const supportsReasoning = supportedParams.includes("include_reasoning");
+            models.push({ id, label: name || id, supportsVision, supportsReasoning });
         }
         return models;
     }
