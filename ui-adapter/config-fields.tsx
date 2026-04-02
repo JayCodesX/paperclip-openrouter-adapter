@@ -202,7 +202,8 @@ export function OpenRouterConfigFields({
     commitTurnModelRules(turnModelRules.filter((_, i) => i !== idx));
   };
 
-  const visionModels = models.filter((m) => m.supportsVision);
+  const sortedModels = [...models].sort((a, b) => a.id.localeCompare(b.id));
+  const visionModels = sortedModels.filter((m) => m.supportsVision);
 
   // Determine if the currently selected model supports reasoning (extended thinking).
   // Falls back to false when models haven't loaded yet or the model is unknown.
@@ -239,7 +240,7 @@ export function OpenRouterConfigFields({
       </Field>
 
       <Field label="Model" hint={help.model}>
-        {models.length > 0 ? (
+        {sortedModels.length > 0 ? (
           <select
             className={selectClass}
             value={
@@ -254,7 +255,7 @@ export function OpenRouterConfigFields({
             }
           >
             <option value="">Default (deepseek/deepseek-chat-v3-0324)</option>
-            {models.map((m) => (
+            {sortedModels.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.label}
               </option>
@@ -283,7 +284,7 @@ export function OpenRouterConfigFields({
         label="Fallback Model"
         hint="Used when the primary model fails (e.g. rate limit)."
       >
-        {models.length > 0 ? (
+        {sortedModels.length > 0 ? (
           <select
             aria-label="Fallback Model"
             className={selectClass}
@@ -299,7 +300,7 @@ export function OpenRouterConfigFields({
             }
           >
             <option value="">None (use primary only)</option>
-            {models.map((m) => (
+            {sortedModels.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.label}
               </option>
@@ -603,7 +604,7 @@ export function OpenRouterConfigFields({
                   })}
                 </div>
               )}
-              {models.length > 0 ? (
+              {sortedModels.length > 0 ? (
                 <select
                   aria-label="Add fallback model"
                   className={selectClass}
@@ -614,7 +615,7 @@ export function OpenRouterConfigFields({
                   }}
                 >
                   <option value="">+ Add fallback model…</option>
-                  {models.map((m) => (
+                  {sortedModels.map((m) => (
                     <option key={m.id} value={m.id}>{m.label}</option>
                   ))}
                 </select>
@@ -917,7 +918,7 @@ export function OpenRouterConfigFields({
         label="Summarize model"
         hint="Model used for session summarization. Defaults to the primary model. A cheap fast model works well here."
       >
-        {models.length > 0 ? (
+        {sortedModels.length > 0 ? (
           <select
             aria-label="Summarize model"
             className={selectClass}
@@ -931,7 +932,7 @@ export function OpenRouterConfigFields({
             }
           >
             <option value="">Default (use primary model)</option>
-            {models.map((m) => (
+            {sortedModels.map((m) => (
               <option key={m.id} value={m.id}>{m.label}</option>
             ))}
           </select>
