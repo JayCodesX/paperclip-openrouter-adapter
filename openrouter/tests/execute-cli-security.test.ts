@@ -1,9 +1,7 @@
 /**
  * Security-path tests for executeAgentLoop:
- *   - non-loopback daemonUrl is ignored (SSRF guard), falls through to spawn
  *   - symlink traversal via instructionsFilePath is blocked (safeInstructionsFilePath = "")
  *   - instructionsFilePath outside cwd is blocked
- *   - malformed daemonUrl (not a valid URL) is silently ignored
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs/promises";
@@ -42,66 +40,6 @@ function makeCtx(
 
 beforeEach(() => _resetStateForTesting());
 afterEach(() => vi.restoreAllMocks());
-
-// ── non-loopback daemonUrl SSRF guard ─────────────────────────────────────────
-
-describe("daemonUrl SSRF guard", () => {
-  it("ignores a non-loopback daemonUrl and logs a warning", async () => {
-    const ctx = makeCtx({ daemonUrl: "http://evil.example.com:4000" });
-    await executeAgentLoop(ctx);
-
-    const stderrLines = (ctx.onLog as ReturnType<typeof vi.fn>).mock.calls
-      .filter(([stream]: [string]) => stream === "stderr")
-      .map(([, msg]: [string, string]) => msg)
-      .join("");
-
-    expect(stderrLines).toMatch(/ignoring non-loopback daemonUrl/i);
-  });
-
-  it("falls through to spawn (cli_not_found) after rejecting non-loopback daemonUrl", async () => {
-    const ctx = makeCtx({ daemonUrl: "http://10.0.0.1:4000" });
-    const result = await executeAgentLoop(ctx);
-
-    // Daemon was skipped (SSRF guard), so we get spawn's cli_not_found
-    expect(result.errorCode).toBe("cli_not_found");
-  });
-
-  it("accepts a loopback daemonUrl (127.0.0.1) without warning", async () => {
-    // Daemon is not actually running, so it will time out / fall through to spawn.
-    // The important thing is no SSRF warning is logged.
-    const ctx = makeCtx({ daemonUrl: "http://127.0.0.1:19999" });
-    await executeAgentLoop(ctx);
-
-    const stderrLines = (ctx.onLog as ReturnType<typeof vi.fn>).mock.calls
-      .filter(([stream]: [string]) => stream === "stderr")
-      .map(([, msg]: [string, string]) => msg)
-      .join("");
-
-    expect(stderrLines).not.toMatch(/ignoring non-loopback daemonUrl/i);
-  });
-
-  it("accepts a localhost daemonUrl without warning", async () => {
-    const ctx = makeCtx({ daemonUrl: "http://localhost:19999" });
-    await executeAgentLoop(ctx);
-
-    const stderrLines = (ctx.onLog as ReturnType<typeof vi.fn>).mock.calls
-      .filter(([stream]: [string]) => stream === "stderr")
-      .map(([, msg]: [string, string]) => msg)
-      .join("");
-
-    expect(stderrLines).not.toMatch(/ignoring non-loopback daemonUrl/i);
-  });
-
-  it("silently ignores a malformed (non-URL) daemonUrl", async () => {
-    const ctx = makeCtx({ daemonUrl: "not-a-url" });
-    const result = await executeAgentLoop(ctx);
-
-    // Falls through to spawn
-    expect(result.errorCode).toBe("cli_not_found");
-    // No crash — result is well-formed
-    expect(result.exitCode).toBe(1);
-  });
-});
 
 // ── instructionsFilePath symlink / traversal guard ───────────────────────────
 

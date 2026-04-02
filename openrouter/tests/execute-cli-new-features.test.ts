@@ -1,12 +1,8 @@
 /**
  * Tests for features added in the most recent execute-cli.ts revision:
- *   - onMeta fires on daemon path (before daemon/spawn branch)
- *   - filesChanged propagated from daemon result
- *   - session_lost structured warn in daemon stream → clearSession: true
  *   - cwd mismatch on session resume → fresh session + log warning
- *   - Daemon key age warning fires at most once per process
  *   - errorCode "no_result" on spawn exit without result event
- *   - cwd stored in daemon sessionParams
+ *   - session_lost structured warn in spawn stream → clearSession: true
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs/promises";
@@ -16,8 +12,6 @@ import {
   _resetStateForTesting,
   _drainStructuredLogForTesting,
   executeAgentLoop,
-  DAEMON_KEY_PATH,
-  DAEMON_KEY_MAX_AGE_MS,
 } from "../src/server/execute-cli.js";
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -44,82 +38,6 @@ function baseArgs(overrides: Record<string, unknown> = {}) {
   };
 }
 
-const TEST_SIGNING_KEY = "test-key-for-new-feature-tests-32b";
-
-/** Build a ReadableStream whose body is the provided NDJSON lines joined by \n. */
-function ndjsonStream(lines: unknown[]): ReadableStream<Uint8Array> {
-  const enc = new TextEncoder();
-  const body = lines.map((l) => JSON.stringify(l)).join("\n") + "\n";
-  return new ReadableStream({
-    start(ctrl) {
-      ctrl.enqueue(enc.encode(body));
-      ctrl.close();
-    },
-  });
-}
-
-/**
- * Stubs fs.readFile and fs.stat so that the signing key path returns
- * a valid key without touching the real filesystem. All other reads are
- * forwarded to the real implementation.
- */
-function stubSigningKey(key: string, mtime = Date.now()) {
-  const realReadFile = fs.readFile.bind(fs);
-  const realStat = fs.stat.bind(fs);
-
-  vi.spyOn(fs, "readFile").mockImplementation(
-    (...args: Parameters<typeof fs.readFile>) => {
-      if (String(args[0]) === DAEMON_KEY_PATH) {
-        return Promise.resolve(key) as ReturnType<typeof fs.readFile>;
-      }
-      return (realReadFile as typeof fs.readFile)(...args);
-    },
-  );
-
-  vi.spyOn(fs, "stat").mockImplementation((...args: Parameters<typeof fs.stat>) => {
-    if (String(args[0]) === DAEMON_KEY_PATH) {
-      // mode 0o100600 = regular file, 600 permissions
-      return Promise.resolve({ mode: 0o100600, mtimeMs: mtime } as Awaited<ReturnType<typeof fs.stat>>);
-    }
-    return (realStat as typeof fs.stat)(...args);
-  });
-}
-
-/** Mock fetch so /health returns ok and /run returns the supplied NDJSON events. */
-function mockDaemon(runEvents: unknown[]) {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn().mockImplementation((url: string) => {
-      if (String(url).endsWith("/health")) {
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve({ status: "ok" }),
-        });
-      }
-      // /run — return streaming NDJSON
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        body: ndjsonStream(runEvents),
-        headers: new Headers(),
-      });
-    }),
-  );
-}
-
-const SUCCESS_EVENTS = [
-  { type: "system", session_id: "sess-1", model: "openai/gpt-4o" },
-  {
-    type: "result",
-    subtype: "success",
-    result: "Done",
-    session_id: "sess-1",
-    usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0 },
-    total_cost_usd: 0.001,
-    turnCount: 2,
-  },
-];
-
 beforeEach(() => {
   _resetStateForTesting();
 });
@@ -129,265 +47,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-// ── onMeta fires on daemon path ──────────────────────────────────────────────
-
-describe("onMeta — daemon path", () => {
-  it("calls onMeta before the daemon request completes", async () => {
-    stubSigningKey(TEST_SIGNING_KEY);
-    mockDaemon(SUCCESS_EVENTS);
-
-    const onMetaCalls: unknown[] = [];
-    const result = await executeAgentLoop({
-      ...baseArgs(),
-      config: {
-        apiKey: "sk-test",
-        model: "openai/gpt-4o",
-        daemonUrl: "http://127.0.0.1:4000",
-        cwd: os.tmpdir(),
-        dangerouslySkipPermissions: true,
-      },
-      onLog: async () => {},
-      onMeta: async (meta) => { onMetaCalls.push(meta); },
-    } as Parameters<typeof executeAgentLoop>[0]);
-
-    expect(onMetaCalls).toHaveLength(1);
-    expect((onMetaCalls[0] as { adapterType: string }).adapterType).toBe("openrouter-cli");
-    expect(result.exitCode).toBe(0);
-  });
-});
-
-// ── filesChanged propagated from daemon path ─────────────────────────────────
-
-describe("filesChanged — daemon path", () => {
-  it("includes filesChanged in resultJson when daemon emits it", async () => {
-    stubSigningKey(TEST_SIGNING_KEY);
-    const eventsWithFiles = [
-      { type: "system", session_id: "sess-2", model: "openai/gpt-4o" },
-      {
-        type: "result",
-        subtype: "success",
-        result: "Done",
-        session_id: "sess-2",
-        usage: { input_tokens: 5, output_tokens: 3, cache_read_input_tokens: 0 },
-        total_cost_usd: 0.0005,
-        turnCount: 1,
-        filesChanged: ["src/foo.ts", "src/bar.ts"],
-      },
-    ];
-    mockDaemon(eventsWithFiles);
-
-    const result = await executeAgentLoop({
-      ...baseArgs(),
-      config: {
-        apiKey: "sk-test",
-        model: "openai/gpt-4o",
-        daemonUrl: "http://127.0.0.1:4000",
-        cwd: os.tmpdir(),
-        dangerouslySkipPermissions: true,
-        trackFileChanges: true,
-      },
-      onLog: async () => {},
-      onMeta: async () => {},
-    } as Parameters<typeof executeAgentLoop>[0]);
-
-    expect(result.exitCode).toBe(0);
-    const rj = result.resultJson as Record<string, unknown>;
-    expect(rj.filesChanged).toEqual(["src/foo.ts", "src/bar.ts"]);
-  });
-
-  it("resultJson.filesChanged is undefined when daemon omits it", async () => {
-    stubSigningKey(TEST_SIGNING_KEY);
-    mockDaemon(SUCCESS_EVENTS);
-
-    const result = await executeAgentLoop({
-      ...baseArgs(),
-      config: {
-        apiKey: "sk-test",
-        model: "openai/gpt-4o",
-        daemonUrl: "http://127.0.0.1:4000",
-        cwd: os.tmpdir(),
-        dangerouslySkipPermissions: true,
-      },
-      onLog: async () => {},
-      onMeta: async () => {},
-    } as Parameters<typeof executeAgentLoop>[0]);
-
-    const rj = result.resultJson as Record<string, unknown>;
-    expect(rj.filesChanged).toBeUndefined();
-  });
-});
-
-// ── session_lost structured warn → clearSession ──────────────────────────────
-
-describe("session loss detection — daemon path", () => {
-  it("sets clearSession=true when daemon emits structured warn subtype session_lost", async () => {
-    stubSigningKey(TEST_SIGNING_KEY);
-    const eventsWithStructuredSessionLost = [
-      { type: "warn", subtype: "session_lost", message: "session old-sess not found, starting fresh", session_id: "old-sess" },
-      { type: "system", session_id: "sess-new", model: "openai/gpt-4o" },
-      {
-        type: "result",
-        subtype: "success",
-        result: "Done",
-        session_id: "sess-new",
-        usage: { input_tokens: 5, output_tokens: 3, cache_read_input_tokens: 0 },
-        total_cost_usd: 0.0005,
-      },
-    ];
-    mockDaemon(eventsWithStructuredSessionLost);
-
-    const result = await executeAgentLoop({
-      ...baseArgs({
-        runtime: {
-          sessionId: "old-session-id",
-          sessionParams: {
-            oragerSessionId: "old-sess",
-            cwd: os.tmpdir(),
-            updatedAt: new Date().toISOString(),
-          },
-          sessionDisplayId: "old-sess",
-          taskKey: null,
-        },
-      }),
-      config: {
-        apiKey: "sk-test",
-        model: "openai/gpt-4o",
-        daemonUrl: "http://127.0.0.1:4000",
-        cwd: os.tmpdir(),
-        dangerouslySkipPermissions: true,
-      },
-      onLog: async () => {},
-      onMeta: async () => {},
-    } as Parameters<typeof executeAgentLoop>[0]);
-
-    expect(result.clearSession).toBe(true);
-  });
-});
-
-// ── runId threaded through daemon structured logs ─────────────────────────────
-
-describe("runId in daemon structured logs", () => {
-  it("structured logs emitted inside executeViaDaemon carry the caller's runId", async () => {
-    stubSigningKey(TEST_SIGNING_KEY);
-    // Emit a session_lost warn so the session_not_found structuredLog fires
-    // inside executeViaDaemon — this is the event that previously logged runId: "".
-    const events = [
-      { type: "warn", subtype: "session_lost", message: "session stale not found, starting fresh", session_id: "stale" },
-      { type: "system", session_id: "sess-new", model: "openai/gpt-4o" },
-      {
-        type: "result",
-        subtype: "success",
-        result: "Done",
-        session_id: "sess-new",
-        usage: { input_tokens: 5, output_tokens: 3, cache_read_input_tokens: 0 },
-        total_cost_usd: 0.0005,
-      },
-    ];
-    mockDaemon(events);
-
-    await executeAgentLoop({
-      ...baseArgs({ runId: "my-specific-run-id" }),
-      config: {
-        apiKey: "sk-test",
-        model: "openai/gpt-4o",
-        daemonUrl: "http://127.0.0.1:4000",
-        cwd: os.tmpdir(),
-        dangerouslySkipPermissions: true,
-      },
-      onLog: async () => {},
-      onMeta: async () => {},
-    } as Parameters<typeof executeAgentLoop>[0]);
-
-    const logs = _drainStructuredLogForTesting();
-    const sessionNotFoundLog = logs.find((e) => e.event === "session_not_found");
-    expect(sessionNotFoundLog).toBeDefined();
-    expect(sessionNotFoundLog?.runId).toBe("my-specific-run-id");
-  });
-});
-
-// ── webhookFormat forwarded to daemon and spawn paths ────────────────────────
-
-describe("webhookFormat forwarding — daemon path", () => {
-  it("passes webhookFormat=discord in the daemon /run request body when webhookUrl is set", async () => {
-    stubSigningKey(TEST_SIGNING_KEY);
-    const capturedBodies: unknown[] = [];
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation((url: string, init?: RequestInit) => {
-        if (String(url).endsWith("/health")) {
-          return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: "ok" }) });
-        }
-        capturedBodies.push(JSON.parse((init?.body as string) ?? "{}"));
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          body: ndjsonStream(SUCCESS_EVENTS),
-          headers: new Headers(),
-        });
-      }),
-    );
-
-    await executeAgentLoop({
-      ...baseArgs(),
-      config: {
-        apiKey: "sk-test",
-        model: "openai/gpt-4o",
-        daemonUrl: "http://127.0.0.1:4000",
-        cwd: os.tmpdir(),
-        dangerouslySkipPermissions: true,
-        webhookUrl: "https://hooks.example.com/notify",
-        webhookFormat: "discord",
-      },
-      onLog: async () => {},
-      onMeta: async () => {},
-    } as Parameters<typeof executeAgentLoop>[0]);
-
-    expect(capturedBodies).toHaveLength(1);
-    const opts = (capturedBodies[0] as { opts: Record<string, unknown> }).opts;
-    expect(opts.webhookUrl).toBe("https://hooks.example.com/notify");
-    expect(opts.webhookFormat).toBe("discord");
-  });
-
-  it("does not set webhookFormat when webhookUrl is absent", async () => {
-    stubSigningKey(TEST_SIGNING_KEY);
-    const capturedBodies: unknown[] = [];
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation((url: string, init?: RequestInit) => {
-        if (String(url).endsWith("/health")) {
-          return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: "ok" }) });
-        }
-        capturedBodies.push(JSON.parse((init?.body as string) ?? "{}"));
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          body: ndjsonStream(SUCCESS_EVENTS),
-          headers: new Headers(),
-        });
-      }),
-    );
-
-    await executeAgentLoop({
-      ...baseArgs(),
-      config: {
-        apiKey: "sk-test",
-        model: "openai/gpt-4o",
-        daemonUrl: "http://127.0.0.1:4000",
-        cwd: os.tmpdir(),
-        dangerouslySkipPermissions: true,
-        webhookFormat: "discord", // set without a webhookUrl
-      },
-      onLog: async () => {},
-      onMeta: async () => {},
-    } as Parameters<typeof executeAgentLoop>[0]);
-
-    expect(capturedBodies).toHaveLength(1);
-    const opts = (capturedBodies[0] as { opts: Record<string, unknown> }).opts;
-    expect(opts.webhookFormat).toBeUndefined();
-  });
-});
+// suppress unused import warning — kept for future spawn-path structured log tests
+void _drainStructuredLogForTesting;
 
 // ── cwd mismatch → log warning and use fresh session ────────────────────────
 
@@ -423,7 +84,7 @@ describe("cwd mismatch on session resume", () => {
 
     const allStderr = stderrLines.join("\n");
     expect(allStderr).toContain("/some/other/dir");
-    // Run ends with cli_not_found (daemon unreachable + spawn binary missing)
+    // Run ends with cli_not_found (spawn binary missing)
     expect(result.errorCode).toBe("cli_not_found");
   });
 
@@ -459,56 +120,6 @@ describe("cwd mismatch on session resume", () => {
 
     const allStderr = stderrLines.join("\n");
     expect(allStderr).not.toContain("starting fresh");
-  });
-});
-
-// ── Daemon key age warning fires at most once ────────────────────────────────
-
-describe("daemon key age warning", () => {
-  it("emits age warning at most once per process reset", async () => {
-    _resetStateForTesting();
-    const oldMtime = Date.now() - DAEMON_KEY_MAX_AGE_MS - 1000;
-    stubSigningKey(TEST_SIGNING_KEY, oldMtime);
-    mockDaemon(SUCCESS_EVENTS);
-
-    const warnMessages: string[] = [];
-    const collectLog = async (_s: "stdout" | "stderr", line: string) => {
-      if (line.includes("days old")) warnMessages.push(line);
-    };
-
-    await executeAgentLoop({
-      ...baseArgs(),
-      config: {
-        apiKey: "sk-test",
-        model: "openai/gpt-4o",
-        daemonUrl: "http://127.0.0.1:4000",
-        cwd: os.tmpdir(),
-        dangerouslySkipPermissions: true,
-      },
-      onLog: collectLog,
-      onMeta: async () => {},
-    } as Parameters<typeof executeAgentLoop>[0]);
-
-    // Reset fetch mock but keep fs spies for second run
-    vi.unstubAllGlobals();
-    mockDaemon(SUCCESS_EVENTS);
-
-    await executeAgentLoop({
-      ...baseArgs({ runId: "run-2" }),
-      config: {
-        apiKey: "sk-test",
-        model: "openai/gpt-4o",
-        daemonUrl: "http://127.0.0.1:4000",
-        cwd: os.tmpdir(),
-        dangerouslySkipPermissions: true,
-      },
-      onLog: collectLog,
-      onMeta: async () => {},
-    } as Parameters<typeof executeAgentLoop>[0]);
-
-    // The warning should have fired exactly once across both runs
-    expect(warnMessages).toHaveLength(1);
-    expect(warnMessages[0]).toContain("days old");
   });
 });
 
@@ -579,31 +190,6 @@ describe("session loss detection — spawn path", () => {
 
     await fs.unlink(scriptPath).catch(() => {});
     expect(result.clearSession).toBe(true);
-  });
-});
-
-// ── cwd stored in daemon sessionParams ───────────────────────────────────────
-
-describe("cwd in daemon sessionParams", () => {
-  it("stores cwd in sessionParams returned from daemon path", async () => {
-    stubSigningKey(TEST_SIGNING_KEY);
-    mockDaemon(SUCCESS_EVENTS);
-
-    const result = await executeAgentLoop({
-      ...baseArgs(),
-      config: {
-        apiKey: "sk-test",
-        model: "openai/gpt-4o",
-        daemonUrl: "http://127.0.0.1:4000",
-        cwd: os.tmpdir(),
-        dangerouslySkipPermissions: true,
-      },
-      onLog: async () => {},
-      onMeta: async () => {},
-    } as Parameters<typeof executeAgentLoop>[0]);
-
-    expect(result.sessionParams).toBeTruthy();
-    expect((result.sessionParams as Record<string, unknown>).cwd).toBe(os.tmpdir());
   });
 });
 

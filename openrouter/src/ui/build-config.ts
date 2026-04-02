@@ -24,17 +24,6 @@ export function buildOpenRouterConfig(
   ac.graceSec = 20;    // 20s between SIGTERM and SIGKILL
   ac.maxTurns = 20;
 
-  // ── Daemon ───────────────────────────────────────────────────────────────────
-  if (typeof vc.daemonUrl === "string" && vc.daemonUrl.trim()) {
-    ac.daemonUrl = vc.daemonUrl.trim();
-  }
-  if (typeof vc.daemonKeyFile === "string" && vc.daemonKeyFile.trim()) {
-    ac.daemonKeyFile = vc.daemonKeyFile.trim();
-  }
-  if (typeof vc.daemonAutoStart === "boolean") {
-    ac.daemonAutoStart = vc.daemonAutoStart;
-  }
-
   // ── Sampling ─────────────────────────────────────────────────────────────────
   if (typeof vc.temperature === "number" && Number.isFinite(vc.temperature)) {
     ac.temperature = vc.temperature;
@@ -324,8 +313,6 @@ export function buildOpenRouterConfig(
     ac.agentApiKey = vc.agentApiKey.trim();
   }
   // ── Agent identity override ───────────────────────────────────────────────
-  // agentId overrides the Paperclip agent.id sent to the daemon as the JWT
-  // subject → metadata.user_id in Anthropic requests.
   if (typeof vc.agentId === "string" && vc.agentId.trim()) {
     ac.agentId = vc.agentId.trim();
   }

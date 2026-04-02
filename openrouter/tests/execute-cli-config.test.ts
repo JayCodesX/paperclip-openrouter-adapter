@@ -399,28 +399,3 @@ describe("OTEL environment variable passthrough", () => {
   });
 });
 
-// ── daemonAutoStart config wiring ─────────────────────────────────────────────
-
-describe("daemonAutoStart config wiring", () => {
-  it("daemonAutoStart: false does not attempt auto-start when env var absent", async () => {
-    delete process.env.ORAGER_DAEMON_AUTOSTART;
-    const logs: Array<{ stream: string; line: string }> = [];
-    const ctx = {
-      runId: "test-autostart",
-      agent: { id: "agent-1", name: "Test", companyId: "co-1" },
-      runtime: { sessionId: null, sessionParams: {} },
-      config: {
-        apiKey: "sk-test",
-        daemonUrl: "http://127.0.0.1:19998",  // unlikely to be running
-        daemonAutoStart: false,
-        cliPath: "/nonexistent/orager",
-      },
-      context: {},
-      onLog: async (stream: string, line: string) => { logs.push({ stream, line }); },
-    };
-    await executeAgentLoop(ctx as Parameters<typeof executeAgentLoop>[0]);
-    // Should NOT log an auto-start attempt
-    const autoStartLog = logs.find(l => l.line.includes("auto-start"));
-    expect(autoStartLog).toBeUndefined();
-  });
-});

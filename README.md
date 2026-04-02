@@ -16,7 +16,7 @@ This adapter replaces Paperclip's default claude-local adapter with one that rou
 
 - **Any model, one key** — OpenRouter proxies Anthropic, OpenAI, Google, Meta, Mistral, and 100+ other providers. Direct `ANTHROPIC_API_KEY` support for zero-markup Claude access.
 - **Smart model routing** — route cheap triggers to DeepSeek, expensive triggers to Claude, architectural decisions to reasoning models. Configurable per wake reason, per turn count, per cost threshold.
-- **Daemon mode** — keeps orager alive between heartbeats. Node.js startup cost drops to ~0ms. All caches stay warm.
+- **In-process execution** — orager runs directly as a subprocess, with full NDJSON streaming, session continuity, and structured logging on every heartbeat.
 
 ## How it works
 
@@ -37,22 +37,18 @@ This adapter replaces Paperclip's default claude-local adapter with one that rou
 │  2. Apply wake-reason model routing                             │
 │  3. Construct API key pool                                      │
 │                                                                 │
-│  ┌──────────────────┐    ┌──────────────────────────────────┐   │
-│  │  Daemon path     │    │  Spawn path (fallback)           │   │
-│  │  (fast)          │    │                                  │   │
-│  │                  │    │  Write config to chmod-600       │   │
-│  │  Read daemon.key │    │  temp file (crypto random name)  │   │
-│  │  Mint HS256 JWT  │    │                                  │   │
-│  │  POST /run       │    │  spawn("orager",                │   │
-│  │  Stream NDJSON   │    │    ["--config-file", path])      │   │
-│  │                  │    │                                  │   │
-│  │  On 503: retry   │    │  Pipe prompt to stdin            │   │
-│  │  with Retry-After│    │  Temp file deleted before        │   │
-│  │                  │    │  first API call                  │   │
-│  └────────┬─────────┘    └──────────────┬───────────────────┘   │
-│           │                             │                       │
-│           └──────────────┬──────────────┘                       │
-│                          │                                      │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  Spawn path                                              │   │
+│  │                                                          │   │
+│  │  Write config to chmod-600 temp file (crypto-random name)│   │
+│  │                                                          │   │
+│  │  spawn("orager", ["--config-file", path])                │   │
+│  │                                                          │   │
+│  │  Pipe prompt to stdin                                    │   │
+│  │  Temp file deleted before first API call                 │   │
+│  │  Stream NDJSON events from stdout                        │   │
+│  └──────────────────────────────┬───────────────────────────┘   │
+│                                 │                               │
 │  4. Parse NDJSON events (text, tool calls, results, warnings)   │
 │  5. Extract session_id, usage, cost                             │
 │  6. Return AdapterExecutionResult                               │
@@ -71,7 +67,7 @@ This adapter replaces Paperclip's default claude-local adapter with one that rou
 
 ### Adapter core (`execute-cli.ts`)
 The primary entrypoint. Receives Paperclip's `execute(ctx)` call and drives the entire run:
-- **Dual execution paths** — tries the daemon first (zero startup cost), falls back to spawning a fresh orager process
+- **Spawn path** — spawns a fresh `orager run` process per heartbeat with a secure temp config file
 - **Wake-reason model routing** — maps Paperclip trigger types (PR opened, comment added, manual) to different model overrides
 - **API key pool** — collects `apiKey` + `apiKeys[]` into an ordered pool for mid-run key rotation on 429
 - **Secure config transport** — writes config (including API keys) to a chmod-600 temp file with a crypto-random name, deleted before the first API call
@@ -79,7 +75,7 @@ The primary entrypoint. Receives Paperclip's `execute(ctx)` call and drives the 
 - **Resource limits** — configurable memory and CPU limits via `ulimit` wrapping, response body size cap (default 50MB)
 
 ### Session browser (`sessions.ts`)
-Exposes `listOragerSessions`, `searchOragerSessions`, and `getOragerSession` for Paperclip's UI. Tries the daemon first (which may use SQLite for fast queries), falls back to reading session JSON files directly with optimized parallel I/O.
+Exposes `listOragerSessions`, `searchOragerSessions`, and `getOragerSession` for Paperclip's UI. Reads session JSON files directly with optimized parallel I/O.
 
 ### Environment validation (`test.ts`)
 Pre-flight checks before the first agent execution: verifies API key presence, orager binary availability, and OpenRouter API reachability. Returns structured pass/fail results so Paperclip surfaces configuration problems before wasting a heartbeat.
@@ -88,7 +84,7 @@ Pre-flight checks before the first agent execution: verifies API key presence, o
 Converts orager's `stream-json` event format into Paperclip's `TranscriptEntry[]`. Each orager event type (assistant text, tool call, tool result, system messages) maps to a corresponding Paperclip transcript shape.
 
 ### UI config (`ui-adapter/`)
-Config form for Paperclip's UI: API key, model selection, daemon URL, max turns, sampling parameters, provider routing, reasoning settings, and tool controls.
+Config form for Paperclip's UI: API key, model selection, max turns, sampling parameters, provider routing, reasoning settings, and tool controls.
 
 ### Bundled skills (`openrouter/skills/`, `skills/`)
 Agent skill definitions (SKILL.md files) that extend orager's capabilities within the Paperclip ecosystem. Includes Paperclip-specific skills for agent creation, issue management, and memory management.
@@ -124,7 +120,7 @@ turnModelRules:
 | **Savings** | baseline | **~30x** |
 
 ### Structured logging
-JSON logs compatible with Datadog, CloudWatch, Loki. Events: `run_start`, `run_complete`, `daemon_retry`, `daemon_fallback`, `session_lost`, `soft_cost_limit`, and more. Set `ORAGER_LOG_FILE` to enable.
+JSON logs compatible with Datadog, CloudWatch, Loki. Events: `run_start`, `run_complete`, `session_lost`, `soft_cost_limit`, and more. Set `ORAGER_LOG_FILE` to enable.
 
 ## Install
 

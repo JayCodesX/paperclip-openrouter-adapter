@@ -4,19 +4,16 @@
  * Exposes past orager agent sessions so Paperclip can list them, search them,
  * and resume a specific session via `forceResume`.
  *
- * When the daemon is running, sessions are fetched via the daemon's
- * /sessions endpoint (which may use an SQLite index for faster queries).
- * Otherwise, sessions are read directly from the filesystem.
+ * Sessions are read directly from the filesystem (~/.orager/sessions/).
  *
  * Usage from Paperclip:
  *   import { listOragerSessions, searchOragerSessions } from "./sessions.js";
- *   const { sessions, total } = await listOragerSessions({ daemonUrl, signingKey, agentId, limit, offset });
+ *   const { sessions, total } = await listOragerSessions({ limit, offset });
  */
 
 import os from "node:os";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { mintDaemonJwt as mintJwt } from "./jwt-utils.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -44,21 +41,13 @@ export interface SearchSessionsResult {
 }
 
 export interface SessionBrowserOptions {
-  /** Base URL of the running orager daemon (e.g. http://127.0.0.1:PORT). */
-  daemonUrl?: string;
-  /** Daemon JWT signing key (from ~/.orager/daemon.key). */
-  signingKey?: string;
-  /** Agent ID for JWT claims. */
-  agentId?: string;
   /** Maximum number of sessions to return (default 50, max 200). */
   limit?: number;
   /** Offset for pagination (default 0). */
   offset?: number;
 }
 
-// mintJwt is imported from ./jwt-utils.js as mintDaemonJwt
-
-// ── Filesystem fallback ───────────────────────────────────────────────────────
+// ── Filesystem helpers ────────────────────────────────────────────────────────
 
 // Re-evaluated on each use so that ORAGER_SESSIONS_DIR set after module import
 // (e.g. in tests or CI) is respected — mirrors orager's getSessionsDir().
@@ -188,73 +177,28 @@ async function searchSessionsFromFilesystem(query: string, limit: number): Promi
   return { sessions: matches.slice(0, limit), total: matches.length, query };
 }
 
-// ── Daemon client ─────────────────────────────────────────────────────────────
-
-async function fetchFromDaemon<T>(
-  daemonUrl: string,
-  signingKey: string,
-  agentId: string,
-  endpoint: string,
-): Promise<T | null> {
-  try {
-    const token = mintJwt(signingKey, agentId);
-    const res = await fetch(`${daemonUrl}${endpoint}`, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(5_000),
-    });
-    if (!res.ok) return null;
-    return await res.json() as T;
-  } catch (err) {
-    // L-10: Log daemon fetch failures for debugging session retrieval issues.
-    process.stderr.write(`[openrouter adapter] sessions: daemon fetch failed for ${endpoint}: ${err instanceof Error ? err.message : String(err)}\n`);
-    return null;
-  }
-}
-
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
  * List all orager sessions, sorted by most-recently-updated first.
  *
- * Tries the daemon first (faster with SQLite backend) and falls back to
- * reading session JSON files directly from ~/.orager/sessions/.
+ * Reads session JSON files directly from ~/.orager/sessions/.
  */
 export async function listOragerSessions(opts: SessionBrowserOptions = {}): Promise<ListSessionsResult> {
   const limit = Math.min(opts.limit ?? 50, 200);
   const offset = Math.max(opts.offset ?? 0, 0);
-
-  if (opts.daemonUrl && opts.signingKey && opts.agentId) {
-    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
-    const result = await fetchFromDaemon<ListSessionsResult>(
-      opts.daemonUrl, opts.signingKey, opts.agentId,
-      `/sessions?${params}`,
-    );
-    if (result) return result;
-  }
-
   return listSessionsFromFilesystem(limit, offset);
 }
 
 /**
  * Search orager sessions by text query.
- * With the SQLite backend and daemon running, uses FTS5 for full-text search.
- * Falls back to simple substring matching on sessionId, cwd, and model.
+ * Uses simple substring matching on sessionId, cwd, and model.
  */
 export async function searchOragerSessions(
   query: string,
   opts: SessionBrowserOptions = {},
 ): Promise<SearchSessionsResult> {
   const limit = Math.min(opts.limit ?? 20, 100);
-
-  if (opts.daemonUrl && opts.signingKey && opts.agentId) {
-    const params = new URLSearchParams({ q: query, limit: String(limit) });
-    const result = await fetchFromDaemon<SearchSessionsResult>(
-      opts.daemonUrl, opts.signingKey, opts.agentId,
-      `/sessions/search?${params}`,
-    );
-    if (result) return result;
-  }
-
   return searchSessionsFromFilesystem(query, limit);
 }
 
@@ -264,17 +208,7 @@ export async function searchOragerSessions(
  */
 export async function getOragerSession(
   sessionId: string,
-  opts: Pick<SessionBrowserOptions, "daemonUrl" | "signingKey" | "agentId"> = {},
 ): Promise<SessionSummary | null> {
-  if (opts.daemonUrl && opts.signingKey && opts.agentId) {
-    const result = await fetchFromDaemon<SessionSummary>(
-      opts.daemonUrl, opts.signingKey, opts.agentId,
-      `/sessions/${encodeURIComponent(sessionId)}`,
-    );
-    if (result) return result;
-  }
-
-  // Filesystem fallback
   try {
     // Validate sessionId to prevent path traversal (e.g. "../../etc/passwd")
     if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) return null;
