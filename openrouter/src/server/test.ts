@@ -365,47 +365,6 @@ export async function testEnvironment(
     }
   }
 
-  // ── Daemon health check (when daemonUrl is configured) ───────────────────
-  const daemonUrl = asString(config.daemonUrl, "").replace(/\/$/, "");
-  if (daemonUrl) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 3_000);
-      let healthRes: Response;
-      try {
-        healthRes = await fetch(`${daemonUrl}/health`, { signal: controller.signal });
-      } finally {
-        clearTimeout(timer);
-      }
-      if (healthRes.ok) {
-        const body = await healthRes.json() as { status?: string; activeRuns?: number; maxConcurrent?: number };
-        const isOk = body.status === "ok";
-        checks.push({
-          code: isOk ? "daemon_health_ok" : "daemon_health_unexpected",
-          level: isOk ? "info" : "warn",
-          message: isOk
-            ? `Daemon at ${daemonUrl} is healthy (${body.activeRuns ?? "?"} / ${body.maxConcurrent ?? "?"} runs active).`
-            : `Daemon at ${daemonUrl} returned unexpected status: ${JSON.stringify(body).slice(0, 120)}`,
-        });
-      } else {
-        checks.push({
-          code: "daemon_health_error",
-          level: "warn",
-          message: `Daemon at ${daemonUrl} returned HTTP ${healthRes.status}.`,
-          hint: "Start the daemon with: orager --serve",
-        });
-      }
-    } catch (err) {
-      checks.push({
-        code: "daemon_unreachable",
-        level: "warn",
-        message: `Daemon at ${daemonUrl} is not reachable.`,
-        detail: (err instanceof Error ? err.message : String(err)).slice(0, 200),
-        hint: "Start the daemon with: orager --serve, or remove daemonUrl from config if daemon mode is not intended.",
-      });
-    }
-  }
-
   return {
     adapterType: ctx.adapterType,
     status: summarizeStatus(checks),
